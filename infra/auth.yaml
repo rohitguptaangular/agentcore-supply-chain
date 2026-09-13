@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Auth layer — Cognito user pool, hosted domain, OAuth2 resource server and the
+  machine-to-machine app client used for every hop in the system.
+
+  This is the piece that was deliberately broken in the lab: an app client with
+  no secret and no client_credentials flow cannot mint an M2M token, so the chat
+  handler could never call the orchestrator. Declaring it here makes that
+  misconfiguration impossible.
+
+Parameters:
+  ProjectName:
+    Type: String
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # The pool itself. No human ever signs in — it exists purely to issue
+  # machine-to-machine access tokens — so there is no password policy worth
+  # tuning and no user attributes to collect.
+  # ---------------------------------------------------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-pool"
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+  # A hosted domain is mandatory for the OAuth2 token endpoint. Without it
+  # there is no https://<domain>/oauth2/token to POST client_credentials to.
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub "${ProjectName}-${AWS::AccountId}"
+
+  # ---------------------------------------------------------------------------
+  # Resource server: defines the custom scopes that appear in the access token.
+  # The gateway and both runtimes validate against these.
+  # ---------------------------------------------------------------------------
+  ResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      Identifier: supplychain
+      Name: !Sub "${ProjectName}-resource-server"
+      Scopes:
+        - ScopeName: read
+          ScopeDescription: Read supply chain data
+        - ScopeName: write
+          ScopeDescription: Modify supply chain data
+
+  # ---------------------------------------------------------------------------
+  # The machine-to-machine client.
+  #
+  # Three properties matter and all three were wrong or missing in the lab:
+  #   GenerateSecret            -> client_credentials requires a secret
+  #   AllowedOAuthFlows         -> must be client_credentials, not code/implicit
+  #   AllowedOAuthScopes        -> the custom scopes, or tokens are rejected
+  # ---------------------------------------------------------------------------
+  MachineClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: ResourceServer
+    Properties:
+      ClientName: !Sub "${ProjectName}-m2m-client"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - supplychain/read
+        - supplychain/write
+      SupportedIdentityProviders:
+        - COGNITO
+      AccessTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+
+  MachineClientId:
+    Description: Goes into every JWT authorizer's allowedClients list.
+    Value: !Ref MachineClient
+
+  CognitoDomain:
+    Description: Full https URL — the chat handler POSTs to {CognitoDomain}/oauth2/token.
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+
+  DiscoveryUrl:
+    Description: OIDC discovery document used by the gateway and runtime JWT authorizers.
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}/.well-known/openid-configuration"
