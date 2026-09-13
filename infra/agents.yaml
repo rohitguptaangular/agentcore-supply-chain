@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Reasoning layer — AgentCore Memory plus the two agent runtimes.
+
+  This is where every other stack converges. The gateway URL, knowledge base
+  id, guardrail id, Cognito details and memory id all arrive as parameters and
+  leave as environment variables on the orchestrator.
+
+  That is the whole point of the project: in the lab each of those values was
+  typed into a console form by hand, and each blank or wrong one was a
+  "challenge". Here CloudFormation resolves them from the resources that
+  produced them, so they cannot be empty, stale or mistyped.
+
+Parameters:
+  ProjectName:
+    Type: String
+
+  ArtifactsBucket:
+    Type: String
+  OrchestratorCodeKey:
+    Type: String
+  SpecialistCodeKey:
+    Type: String
+
+  OrchestratorModelId:
+    Type: String
+  SpecialistModelId:
+    Type: String
+
+  DiscoveryUrl:
+    Type: String
+  MachineClientId:
+    Type: String
+  CognitoDomain:
+    Type: String
+  UserPoolId:
+    Type: String
+
+  GatewayUrl:
+    Type: String
+  GuardrailId:
+    Type: String
+
+  EnableKnowledgeBase:
+    Type: String
+    AllowedValues: ["true", "false"]
+  KnowledgeBaseId:
+    Type: String
+    Default: ""
+
+  EnableVpc:
+    Type: String
+    AllowedValues: ["true", "false"]
+  PrivateSubnetIds:
+    Type: String
+    Default: ""
+    Description: Comma-separated. Empty when EnableVpc is false.
+  SecurityGroupId:
+    Type: String
+    Default: ""
+
+  MemoryExpiryDays:
+    Type: Number
+    Default: 30
+    Description: How long raw conversation events are retained (7-365).
+
+  AgentRuntimeVersion:
+    Type: String
+    Default: PYTHON_3_13
+    AllowedValues: [PYTHON_3_10, PYTHON_3_11, PYTHON_3_12, PYTHON_3_13]
+    Description: >
+      Managed runtime the agent zip is executed on. Kept in step with the
+      Lambda runtime so there is one Python version across the project.
+
+Conditions:
+  UseVpc: !Equals [!Ref EnableVpc, "true"]
+  UseKnowledgeBase: !Equals [!Ref EnableKnowledgeBase, "true"]
+
+Resources:
+  # ===========================================================================
+  # MEMORY
+  #
+  # Short-term memory is the raw event stream. Long-term memory is produced by
+  # the strategies below: background processes that read those events and
+  # distil durable records. That extraction is asynchronous — typically 30-60
+  # seconds — which is why a conversation is not instantly recallable.
+  #
+  # Namespaces are the addressing and isolation model. {actorId} and
+  # {sessionId} are substituted at write and read time, so one user's memories
+  # are stored under a path no other user's reads will ever match.
+  # ===========================================================================
+  Memory:
+    Type: AWS::BedrockAgentCore::Memory
+    Properties:
+      Name: !Sub "${ProjectName}_memory"   # underscores only — hyphens are rejected
+      Description: Conversation memory for the supply chain assistant
+      EventExpiryDuration: !Ref MemoryExpiryDays
+      MemoryStrategies:
+        # Durable facts: "the Hamburg warehouse handles hydraulics".
+        - SemanticMemoryStrategy:
+            Name: semantic
+            Namespaces:
+              - !Sub "${ProjectName}/user/{actorId}/semantic"
+        # Stable preferences: "Alex prefers detailed reports".
+        - UserPreferenceMemoryStrategy:
+            Name: preferences
+            Namespaces:
+              - !Sub "${ProjectName}/user/{actorId}/preferences"
+        # Per-session gist, so a long conversation can be resumed cheaply.
+        - SummaryMemoryStrategy:
+            Name: summary
+            Namespaces:
+              - !Sub "${ProjectName}/user/{actorId}/session/{sessionId}/summary"
+
+  # ===========================================================================
+  # IAM — one role per agent, each scoped to what that agent actually does.
+  # ===========================================================================
+
+  # The specialist only reads documents and calls one small model.
+  SpecialistRole:
+    Type: AWS::IAM::Role
+    Condition: UseKnowledgeBase
+    Properties:
+      RoleName: !Sub "${ProjectName}-kb-specialist-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: kb-specialist
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RetrievePassages
+                Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+              - Sid: InvokeModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+              - Sid: Logging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  # The orchestrator does considerably more: calls a model through a guardrail,
+  # reads and writes memory, invokes the specialist agent, and reads its own
+  # Cognito client secret so it can obtain a token for the gateway.
+  OrchestratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-orchestrator-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: orchestrator
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+              - Sid: ApplyGuardrail
+                Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/${GuardrailId}"
+              - Sid: UseMemory
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:RetrieveMemoryRecords
+                  - bedrock-agentcore:ListMemoryRecords
+                  - bedrock-agentcore:GetMemoryRecord
+                Resource: !GetAtt Memory.MemoryArn
+              # Agent-to-agent: permission to invoke any runtime in this
+              # account. Narrowing this to the specialist's ARN would create a
+              # circular dependency, since the specialist is created first and
+              # the orchestrator's role is referenced by it in turn.
+              - Sid: InvokeSpecialistAgent
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*"
+              # Needed to read its own client secret at runtime so it can mint
+              # an M2M token for the gateway. The secret is never stored in an
+              # environment variable.
+              - Sid: ReadOwnClientSecret
+                Effect: Allow
+                Action: cognito-idp:DescribeUserPoolClient
+                Resource: !Sub "arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+              - Sid: Logging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  # ===========================================================================
+  # KNOWLEDGE BASE SPECIALIST RUNTIME
+  #
+  # Created first, because the orchestrator needs its ARN. This is the "second
+  # agent" in the architecture: a cheaper model with a single job, reached over
+  # agent-to-agent invocation.
+  # ===========================================================================
+  SpecialistRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Condition: UseKnowledgeBase
+    Properties:
+      AgentRuntimeName: !Sub "${ProjectName}_kb_specialist"
+      Description: Knowledge base retrieval specialist
+      RoleArn: !GetAtt SpecialistRole.Arn
+      ProtocolConfiguration: HTTP
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Code:
+            S3:
+              Bucket: !Ref ArtifactsBucket
+              Prefix: !Ref SpecialistCodeKey
+          EntryPoint:
+            - main.py
+          Runtime: !Ref AgentRuntimeVersion
+      # Same Cognito client as everything else. The orchestrator presents the
+      # token it already holds when it makes the A2A call.
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref DiscoveryUrl
+          AllowedClients:
+            - !Ref MachineClientId
+      NetworkConfiguration: !If
+        - UseVpc
+        - NetworkMode: VPC
+          NetworkModeConfig:
+            SubnetIds: !Split [",", !Ref PrivateSubnetIds]
+            SecurityGroups:
+              - !Ref SecurityGroupId
+        - NetworkMode: PUBLIC
+      EnvironmentVariables:
+        MODEL_ID: !Ref SpecialistModelId
+        KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+
+  # Callers invoke a runtime through an endpoint, not the runtime directly, and
+  # the qualifier they pass is the endpoint name. Everything in this system
+  # uses the conventional name DEFAULT.
+  #
+  # An endpoint maps to one runtime VERSION, which is what decouples "deploy a
+  # new version" from "send traffic to it" — and what produced the transient
+  # 404 during the lab, when traffic was sent while the endpoint was still
+  # rolling to the new version.
+  SpecialistEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Condition: UseKnowledgeBase
+    Properties:
+      Name: DEFAULT
+      AgentRuntimeId: !GetAtt SpecialistRuntime.AgentRuntimeId
+      Description: Default endpoint tracking the latest specialist version
+
+  # ===========================================================================
+  # ORCHESTRATOR RUNTIME
+  #
+  # The EnvironmentVariables block below is the heart of the whole project.
+  # Read it next to the lab challenges:
+  #
+  #   GATEWAY_URL               Challenge 2 — was empty, no tools discovered
+  #   KB_SPECIALIST_RUNTIME_ARN Challenge 3 — was empty, no document answers
+  #   MEMORY_ID                 Challenge 4 — did not exist, no recall
+  #   GUARDRAIL_ID              Challenge 6 — did not exist, no filtering
+  #   COGNITO_*                 Challenge 1 — wrong client, nothing worked
+  #
+  # Every one is now a !Ref or !GetAtt to the resource that produced it.
+  # ===========================================================================
+  OrchestratorRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub "${ProjectName}_orchestrator"
+      Description: Supply chain orchestrator agent
+      RoleArn: !GetAtt OrchestratorRole.Arn
+      ProtocolConfiguration: HTTP
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Code:
+            S3:
+              Bucket: !Ref ArtifactsBucket
+              Prefix: !Ref OrchestratorCodeKey
+          EntryPoint:
+            - main.py
+          Runtime: !Ref AgentRuntimeVersion
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref DiscoveryUrl
+          AllowedClients:
+            - !Ref MachineClientId
+      NetworkConfiguration: !If
+        - UseVpc
+        - NetworkMode: VPC
+          NetworkModeConfig:
+            SubnetIds: !Split [",", !Ref PrivateSubnetIds]
+            SecurityGroups:
+              - !Ref SecurityGroupId
+        - NetworkMode: PUBLIC
+      EnvironmentVariables:
+        MODEL_ID: !Ref OrchestratorModelId
+        GATEWAY_URL: !Ref GatewayUrl
+        MEMORY_ID: !GetAtt Memory.MemoryId
+        GUARDRAIL_ID: !Ref GuardrailId
+        # DRAFT always reflects the current policy. Switch to the published
+        # version number from the guardrails stack to pin it.
+        GUARDRAIL_VERSION: DRAFT
+        KB_SPECIALIST_RUNTIME_ARN: !If
+          - UseKnowledgeBase
+          - !GetAtt SpecialistRuntime.AgentRuntimeArn
+          - ""
+        MEMORY_NAMESPACE_PREFIX: !Ref ProjectName
+        COGNITO_DOMAIN: !Ref CognitoDomain
+        COGNITO_CLIENT_ID: !Ref MachineClientId
+        COGNITO_USER_POOL_ID: !Ref UserPoolId
+
+  OrchestratorEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      Name: DEFAULT
+      AgentRuntimeId: !GetAtt OrchestratorRuntime.AgentRuntimeId
+      Description: Default endpoint tracking the latest orchestrator version
+
+Outputs:
+  OrchestratorRuntimeArn:
+    Description: The chat handler invokes this with qualifier DEFAULT.
+    Value: !GetAtt OrchestratorRuntime.AgentRuntimeArn
+
+  OrchestratorRuntimeId:
+    Value: !GetAtt OrchestratorRuntime.AgentRuntimeId
+
+  SpecialistRuntimeArn:
+    Condition: UseKnowledgeBase
+    Value: !GetAtt SpecialistRuntime.AgentRuntimeArn
+
+  MemoryId:
+    Value: !GetAtt Memory.MemoryId
+
+  MemoryArn:
+    Value: !GetAtt Memory.MemoryArn

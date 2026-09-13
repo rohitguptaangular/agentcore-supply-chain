@@ -1,0 +1,5 @@
+# AgentCore Runtime SDK — same entrypoint contract as the orchestrator.
+bedrock-agentcore
+
+# Bedrock knowledge base retrieval and model invocation.
+boto3
