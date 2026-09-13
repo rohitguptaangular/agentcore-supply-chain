@@ -183,12 +183,39 @@ doesn't work:
   inventory Lambda returns inventory rows to shipment questions — plausible,
   wrong, and hard to spot in a chat transcript.
 
-## 6. OpenSearch Serverless and the knowledge base
+## 6. Vector store and the knowledge base
 
-*Template: `infra/knowledge.yaml`*
+*Templates: `infra/knowledge-s3vectors.yaml` (default) or `infra/knowledge.yaml`*
 
-This is the longest section and the only one where the console is genuinely
-easier than the template, because it creates the vector index for you.
+Pick one of the two. S3 Vectors is cheaper and quicker to click together;
+OpenSearch is what most enterprise RAG runs on and is worth doing once.
+
+### 6a. S3 Vectors (recommended)
+
+**Create the vector bucket.** S3 → Vector buckets → Create vector bucket.
+
+- Name: `sc-vectors-<account>`
+- Encryption: default
+
+A vector bucket isn't an ordinary S3 bucket. It has its own API namespace
+(`s3vectors`), you can't browse objects in it, and it's addressed by ARN.
+
+**Create the index.** Open the bucket → Vector indexes → Create index.
+
+- Name: `sc-kb-index`
+- Dimension: **1024**
+- Distance metric: **Cosine**
+- Data type: `float32`
+
+1024 is not arbitrary — it's the output width of Titan Text Embeddings V2. Get
+this wrong and the knowledge base creates fine and fails every sync.
+
+Cosine compares direction rather than magnitude, so a long document doesn't
+score higher just for being long. It's the normal choice for text.
+
+Then skip to **"Create the knowledge base"** below.
+
+### 6b. OpenSearch Serverless (the alternative)
 
 **Create the collection.** OpenSearch Service → Serverless → Collections →
 Create.
@@ -199,25 +226,35 @@ Create.
 
 Wait for Active, then copy the collection ARN.
 
-**Create the knowledge base.** Bedrock → Knowledge Bases → Create. In the
-current console this is **Create Managed KB → Self-managed KB → Unstructured
-Vector Store KB**. That's the option that lets you point at a collection you
-already have; "Managed KB" would create its own store and ignore yours.
+Note what the console just did for you that CloudFormation can't: it created
+the encryption policy, the network policy, the data access policy, and it will
+create the vector index during knowledge base creation. That last one is why
+`infra/knowledge.yaml` needs a custom resource — CloudFormation has no resource
+type for an OpenSearch index.
+
+### Create the knowledge base
+
+Bedrock → Knowledge Bases → Create. In the current console this is
+**Create Managed KB → Self-managed KB → Unstructured Vector Store KB**. That's
+the option that lets you bring your own vector store; "Managed KB" would create
+its own and ignore what you just built.
 
 - Name: `sc-kb`
 - IAM: create a new service role, or use an existing one
 - Data source: S3, your knowledge bucket
 - Embeddings: **Titan Text Embeddings V2**
-- Vector store: the collection you just made
+- Vector store: whichever you built — the S3 vector index, or the OpenSearch
+  collection
 
-If you let the console create the index, note the field names it chose — you'll
-need them if you ever rebuild this in CloudFormation. If you create the index
-yourself, use the mapping in `src/lambdas/opensearch_index/app.py`: vector
-field `bedrock-kb-vector` with dimension 1024, text field
-`AMAZON_BEDROCK_TEXT_CHUNK`, metadata `AMAZON_BEDROCK_METADATA`.
+On the OpenSearch path, if you let the console create the index, note the field
+names it chose — you'll need them if you rebuild this in CloudFormation. If you
+create the index yourself, use the mapping in
+`src/lambdas/opensearch_index/app.py`: vector field `bedrock-kb-vector`,
+dimension 1024, text field `AMAZON_BEDROCK_TEXT_CHUNK`, metadata
+`AMAZON_BEDROCK_METADATA`.
 
-The dimension has to match the embedding model. Titan V2 is 1024. A mismatch
-creates cleanly and fails every sync.
+Either way the dimension has to match the embedding model. Titan V2 is 1024. A
+mismatch creates cleanly and fails every sync.
 
 **Sync.** Select the data source → Sync. Wait for Completed and check it
 scanned more than zero documents. Zero means the role can't read the bucket or
