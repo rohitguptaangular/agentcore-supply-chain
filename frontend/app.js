@@ -83,7 +83,11 @@ function currentSession() {
 
 function createSession() {
   const session = {
-    id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    // AgentCore requires runtime session ids of at least 33 characters. The
+    // chat handler pads short ones, but generating a long id here keeps the
+    // browser id and the runtime id identical, which makes logs easier to
+    // follow. crypto.randomUUID is 36 characters on its own.
+    id: `session-${crypto.randomUUID()}`,
     title: "New conversation",
     createdAt: new Date().toISOString(),
     messages: [],

@@ -166,22 +166,32 @@ Copy the **Gateway URL** when it's READY — it ends in `/mcp`.
 
 | Name | Lambda | Schema |
 |---|---|---|
-| `inventory-target` | `sc-inventory-handler` | `inventory_tools.json` |
-| `supplier-target` | `sc-supplier-handler` | `supplier_tools.json` |
-| `logistics-target` | `sc-logistics-handler` | `logistics_tools.json` |
-| `quality-target` | `sc-quality-handler` | `quality_tools.json` |
+| `inventory` | `sc-inventory-handler` | `inventory_tools.json` |
+| `supplier` | `sc-supplier-handler` | `supplier_tools.json` |
+| `logistics` | `sc-logistics-handler` | `logistics_tools.json` |
+| `quality` | `sc-quality-handler` | `quality_tools.json` |
 
-For each: target type Lambda, the function ARN, tool schema from S3, credential
-provider **Gateway IAM role**.
+For each: target protocol **MCP target** (not "Customised target" — only MCP
+offers a Lambda target type), target type Lambda, the function ARN, tool schema
+from S3, credential provider **Gateway IAM role**.
 
-Two things to watch here, both of which produce a target that reports READY and
+Three things to watch, all of which produce a target that reports READY and
 doesn't work:
 
+- **No hyphens in target names.** The gateway names tools `<target>___<tool>`,
+  and Nova cannot handle a hyphen in a tool name. `inventory-target` gives you
+  `inventory-target___list_products`, which fails at runtime with
+  `Model produced invalid sequence as part of ToolUse`. See bug 5 below.
 - **A target with no schema exposes no tools.** The console lets you create one
   without a schema and shows it as healthy.
 - **Check the ARN is the right function.** A logistics target pointing at the
   inventory Lambda returns inventory rows to shipment questions — plausible,
   wrong, and hard to spot in a chat transcript.
+
+The S3 schema field is a picker, not a text box. Typing a URI into it leaves the
+value uncommitted and the form reports "S3 location is required" while showing
+your text. Use **Browse S3**, or switch to **Define an inline schema** and paste
+the file contents.
 
 ## 6. Vector store and the knowledge base
 
@@ -470,6 +480,129 @@ Delete in this order, most expensive first:
 7. Cognito user pool
 
 CloudFront takes about 15 minutes to disable before it will delete.
+
+## Nine things that only break when you deploy
+
+I built this by hand after writing the templates, and it found nine bugs. All
+are fixed in the repo now. They are listed here because every one of them looks
+like something else at first, and because the templates would have hit the same
+walls.
+
+### 1. AgentCore does not install requirements.txt
+
+Direct code deployment runs the zip as-is. A zip containing only source fails
+with `ModuleNotFoundError: No module named 'bedrock_agentcore'` — and because a
+container that crashes on import never finishes booting, the invocation returns
+`Runtime initialization time exceeded. Please make sure that initialization
+completes in 30s`. The error names the wrong problem entirely.
+
+Dependencies must be vendored, resolved for the runtime's platform:
+
+    pip install -r requirements.txt --target build/ \
+      --platform manylinux2014_aarch64 --python-version 3.13 --only-binary=:all:
+
+### 2. Do not strip *.dist-info
+
+Trimming metadata directories to shrink the zip breaks any library that reads
+its own version at import: `PackageNotFoundError: No package metadata was found
+for httpx2`. Only `__pycache__` and `bin/` are safe to remove.
+
+### 3. mcp 2.x renamed streamablehttp_client
+
+The Strands docs example uses `from mcp.client.streamable_http import
+streamablehttp_client`, which is mcp 1.x. In 2.x it is `streamable_http_client`.
+The modern Strands API avoids the question entirely:
+
+    MCPClient(url=GATEWAY_URL, headers={"Authorization": f"Bearer {token}"})
+
+Both requirements.txt files are now pinned so an unrelated rebuild cannot move
+underneath the code.
+
+### 4. Cross-region inference profiles need wildcard region in IAM
+
+A model id beginning `us.` is an inference profile, not a model. Bedrock routes
+the call to whichever US region has capacity, and **IAM evaluates the
+destination ARN**. A policy scoped to `arn:aws:bedrock:us-east-1::foundation-model/*`
+produces:
+
+    not authorized to perform: bedrock:InvokeModelWithResponseStream
+    on resource: arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-pro-v1:0
+
+Grant `arn:aws:bedrock:*::foundation-model/*` plus the regional
+`inference-profile/*`.
+
+### 5. Nova cannot handle a hyphen in a tool name
+
+This is the one worth remembering. The gateway composes tool names as
+`<target>___<tool>`, so a target called `inventory-target` produces
+`inventory-target___list_products`, and Nova responds with:
+
+    modelStreamErrorException: Model produced invalid sequence as part of ToolUse
+
+Bedrock's own `toolSpec` schema accepts hyphens, so nothing rejects it up front.
+Isolated by calling `converse` directly with one tool at a time:
+
+| tool name | result |
+|---|---|
+| `list_products` | works |
+| `inventory___list_products` | works |
+| `inventorytarget___list_products` | works |
+| `inventory-list_products` | fails |
+| `inventory-target___list_products` | fails |
+
+The triple underscore is fine. The hyphen is not. **Name gateway targets
+without hyphens** — `inventory`, not `inventory-target`.
+
+### 6. create_event requires eventTimestamp
+
+`bedrock-agentcore:CreateEvent` rejects a call without it:
+`Missing required parameter in input: "eventTimestamp"`. Pass a timezone-aware
+datetime.
+
+### 7. except ClientError was too narrow to protect the turn
+
+The memory write is wrapped in a try/except precisely so a memory failure never
+costs the user their answer. But botocore raises `ParamValidationError` *before
+sending the request*, and that is not a subclass of `ClientError` — so bug 6
+escaped the handler and destroyed a perfectly good response.
+
+A `try/except` naming too specific an exception is sometimes worse than none,
+because it reads as protection that is not there. Code that runs after the
+answer already exists should catch `Exception`.
+
+### 8. Runtime session ids must be at least 33 characters
+
+    Value at 'runtimeSessionId' failed to satisfy constraint:
+    Member must have length greater than or equal to 33
+
+Browser-generated ids are shorter than that. The chat handler now pads a short
+id with a SHA-256 of itself — deterministic, so the same conversation always
+maps to the same runtime session and context survives across turns.
+
+### 9. CORS that works in curl and fails in every browser
+
+The API had `AllowMethods` and `MaxAge` but no `AllowOrigins` or
+`AllowHeaders`. Preflight returned `204` with no `Access-Control-Allow-Origin`
+header, so browsers would block every request — while curl, which never sends
+`Origin`, worked perfectly.
+
+Always test preflight explicitly:
+
+    curl -i -X OPTIONS "$API/chat" \
+      -H "Origin: https://example.com" \
+      -H "Access-Control-Request-Method: POST" \
+      -H "Access-Control-Request-Headers: content-type"
+
+### Two more worth knowing
+
+**AgentCore creates the DEFAULT endpoint for you.** Declaring an
+`AWS::BedrockAgentCore::RuntimeEndpoint` named DEFAULT collides with the
+managed one.
+
+**MCP needs a protocol version header.** Calls after `initialize` default to
+`2025-03-26`, which the gateway rejects. Send
+`MCP-Protocol-Version: 2025-11-25`. The Strands client handles this; anything
+hand-rolled does not.
 
 ## What this exercise is for
 

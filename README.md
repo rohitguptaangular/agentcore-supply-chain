@@ -36,10 +36,9 @@ orchestrator.
 
 Behind the gateway there are four Lambda functions, one per domain
 (inventory, supplier, logistics, quality), each with read access to only its
-own DynamoDB tables. The knowledge base sits on OpenSearch Serverless with
-Titan V2 embeddings.
-
-Full walkthrough: [docs/architecture.md](docs/architecture.md).
+own DynamoDB tables. The knowledge base embeds documents with Titan V2 and
+stores the vectors in S3 Vectors by default, or OpenSearch Serverless behind a
+flag.
 
 ## The bit I found most interesting
 
@@ -199,6 +198,40 @@ thing that changes how the whole system feels.
   two stacks. Fixable with a second pass; I left it wide and commented.
 - **No tests.** The tool handlers are pure enough to unit test against a
   DynamoDB local or moto; I haven't written them yet.
+
+## What deploying it actually taught me
+
+I wrote the templates first, then built the same architecture by hand in the
+console to check my understanding. That found **nine bugs**, none of which any
+amount of re-reading the YAML would have caught. All are fixed here; all are
+written up in [docs/console-walkthrough.md](docs/console-walkthrough.md).
+
+The one I'd never have guessed:
+
+**Amazon Nova cannot handle a hyphen in a tool name.** The AgentCore Gateway
+names tools `<target>___<tool>`, so a target called `inventory-target` produces
+`inventory-target___list_products`, and every turn dies with
+`modelStreamErrorException: Model produced invalid sequence as part of ToolUse`.
+Bedrock's own `toolSpec` schema accepts hyphens, so nothing rejects it up front.
+I isolated it by calling `converse` directly with one tool at a time —
+`inventory___list_products` works, `inventory-target___list_products` does not.
+Gateway targets in this repo are named `inventory`, `supplier`, `logistics`,
+`quality` for exactly that reason.
+
+Three others worth the summary:
+
+- **AgentCore does not install `requirements.txt`.** Dependencies must be
+  vendored into the zip, resolved for linux/aarch64. A missing module shows up
+  as `Runtime initialization time exceeded`, which points at the wrong problem
+  entirely.
+- **A model id starting `us.` is a cross-region inference profile.** IAM
+  evaluates the *destination* ARN, so a policy scoped to one region fails with
+  an AccessDenied naming a region you never asked for.
+- **`except ClientError` was too narrow** around the memory write. botocore
+  raises `ParamValidationError` before sending, so the exception escaped a
+  handler whose only job was to stop memory failures costing the user their
+  answer. A `try/except` naming too specific an exception can be worse than
+  none, because it reads as protection that isn't there.
 
 ## Why I built it
 

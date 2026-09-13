@@ -26,7 +26,6 @@ import logging
 import os
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from mcp.client.streamable_http import streamablehttp_client
 from strands import Agent
 from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
@@ -100,16 +99,18 @@ def _build_model() -> BedrockModel:
 def _gateway_client() -> MCPClient:
     """Open an MCP client against the AgentCore Gateway.
 
-    The token is fetched inside the factory rather than captured once, because
-    MCPClient calls the factory when it establishes the transport. Reading it
-    at connection time means a long-lived container never reconnects with a
-    token that expired while it was idle.
+    Passing `url` lets Strands build the streamable HTTP transport itself. The
+    older pattern of handing it a transport_callable built from
+    mcp.client.streamable_http still works, but the function was renamed in
+    mcp 2.x and constructing it here adds nothing.
+
+    A fresh client is built per invocation, so the bearer token is read at the
+    point of use rather than captured at import — a container can live for
+    hours and a token minted at startup would be long expired.
     """
     return MCPClient(
-        lambda: streamablehttp_client(
-            url=GATEWAY_URL,
-            headers={"Authorization": f"Bearer {identity.get_access_token()}"},
-        )
+        url=GATEWAY_URL,
+        headers={"Authorization": f"Bearer {identity.get_access_token()}"},
     )
 
 

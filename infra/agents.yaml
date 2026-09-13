@@ -149,7 +149,12 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/*"
+                  # A model id prefixed "us." is a cross-region inference
+                  # profile: Bedrock may route the call to us-east-2 or
+                  # us-west-2, and IAM evaluates the DESTINATION arn. Scoping
+                  # foundation-model to one region produces an AccessDenied
+                  # naming a region you never asked for.
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
                   - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
               - Sid: Logging
                 Effect: Allow
@@ -187,7 +192,12 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/*"
+                  # A model id prefixed "us." is a cross-region inference
+                  # profile: Bedrock may route the call to us-east-2 or
+                  # us-west-2, and IAM evaluates the DESTINATION arn. Scoping
+                  # foundation-model to one region produces an AccessDenied
+                  # naming a region you never asked for.
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
                   - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
               - Sid: ApplyGuardrail
                 Effect: Allow
@@ -270,21 +280,15 @@ Resources:
         MODEL_ID: !Ref SpecialistModelId
         KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
 
-  # Callers invoke a runtime through an endpoint, not the runtime directly, and
-  # the qualifier they pass is the endpoint name. Everything in this system
-  # uses the conventional name DEFAULT.
+  # NOTE: there is deliberately no AWS::BedrockAgentCore::RuntimeEndpoint here.
+  # AgentCore creates a DEFAULT endpoint with every runtime, so declaring one
+  # collides with the managed resource. Callers invoke a runtime through an
+  # endpoint rather than directly, and the qualifier they pass is that
+  # endpoint's name — DEFAULT throughout this system.
   #
-  # An endpoint maps to one runtime VERSION, which is what decouples "deploy a
-  # new version" from "send traffic to it" — and what produced the transient
-  # 404 during the lab, when traffic was sent while the endpoint was still
-  # rolling to the new version.
-  SpecialistEndpoint:
-    Type: AWS::BedrockAgentCore::RuntimeEndpoint
-    Condition: UseKnowledgeBase
-    Properties:
-      Name: DEFAULT
-      AgentRuntimeId: !GetAtt SpecialistRuntime.AgentRuntimeId
-      Description: Default endpoint tracking the latest specialist version
+  # An endpoint maps to one runtime VERSION, which decouples "deploy a new
+  # version" from "send traffic to it", and is why invoking during an update
+  # briefly returns "No endpoint or agent found with qualifier 'DEFAULT'".
 
   # ===========================================================================
   # ORCHESTRATOR RUNTIME
@@ -345,13 +349,6 @@ Resources:
         COGNITO_DOMAIN: !Ref CognitoDomain
         COGNITO_CLIENT_ID: !Ref MachineClientId
         COGNITO_USER_POOL_ID: !Ref UserPoolId
-
-  OrchestratorEndpoint:
-    Type: AWS::BedrockAgentCore::RuntimeEndpoint
-    Properties:
-      Name: DEFAULT
-      AgentRuntimeId: !GetAtt OrchestratorRuntime.AgentRuntimeId
-      Description: Default endpoint tracking the latest orchestrator version
 
 Outputs:
   OrchestratorRuntimeArn:

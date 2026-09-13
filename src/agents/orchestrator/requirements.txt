@@ -1,12 +1,7 @@
-# AgentCore Runtime SDK — provides BedrockAgentCoreApp and the @app.entrypoint
-# contract (POST /invocations, GET /ping) the runtime expects.
-bedrock-agentcore
-
-# Agent framework: the reasoning loop, tool binding and Bedrock model wrapper.
-strands-agents
-
-# MCP client transport used to talk to the AgentCore Gateway.
-mcp
-
-# Cognito and AgentCore Memory calls.
-boto3
+# Versions pinned to what this agent was built and tested against. mcp 2.x
+# renamed streamablehttp_client, which broke an unpinned rebuild — pin, and
+# upgrade deliberately.
+bedrock-agentcore==1.23.0
+strands-agents==1.55.1
+mcp==2.1.1
+boto3>=1.40

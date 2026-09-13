@@ -25,9 +25,11 @@ bearer token.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -48,6 +50,8 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 QUALIFIER = "DEFAULT"
 EXPIRY_MARGIN_SECONDS = 60
+# AgentCore rejects runtime session ids shorter than this.
+RUNTIME_SESSION_MIN_LENGTH = 33
 
 # API Gateway cuts the integration off at 30s, so never wait longer than that.
 INVOKE_TIMEOUT_SECONDS = 25
@@ -105,6 +109,22 @@ def lambda_handler(event, _context):
     return _response(200, {"reply": result, "session_id": session_id})
 
 
+def _runtime_session_id(session_id: str) -> str:
+    """Return a session id AgentCore will accept.
+
+    AgentCore requires at least 33 characters, which browser-generated ids are
+    not obliged to know about. Short ids are extended with a hash of
+    themselves rather than random padding, so the same conversation always
+    maps to the same runtime session and context is preserved across turns.
+    """
+    if len(session_id) >= RUNTIME_SESSION_MIN_LENGTH:
+        return session_id
+
+    digest = hashlib.sha256(session_id.encode()).hexdigest()
+    # Keep the original prefix so the id stays recognisable in logs.
+    return f"{session_id}-{digest}"[:96]
+
+
 def _invoke_orchestrator(payload: dict) -> str:
     """POST to the runtime's invocation endpoint with a bearer token."""
     encoded_arn = urllib.parse.quote(ORCHESTRATOR_RUNTIME_ARN, safe="")
@@ -120,7 +140,9 @@ def _invoke_orchestrator(payload: dict) -> str:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {_get_token()}",
             # Lets AgentCore correlate turns into one runtime session.
-            "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": payload["session_id"],
+            "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": _runtime_session_id(
+                payload["session_id"]
+            ),
         },
         method="POST",
     )
@@ -136,17 +158,33 @@ def _extract_text(raw: str) -> str:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return raw
+        return _strip_reasoning(raw)
 
     if isinstance(parsed, str):
-        return parsed
+        return _strip_reasoning(parsed)
     if isinstance(parsed, dict):
         for key in ("result", "response", "output", "text", "message"):
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():
-                return value
+                return _strip_reasoning(value)
 
     return json.dumps(parsed)
+
+
+def _strip_reasoning(text: str) -> str:
+    """Remove the model's private reasoning before it reaches a user.
+
+    Nova wraps its deliberation in <thinking> tags. That is useful in the logs
+    and noise in a chat bubble, so it is removed here rather than in the UI —
+    any client of this API gets the same clean answer.
+
+    If stripping would leave nothing — the whole response was reasoning, or a
+    tag was never closed — the original text is returned instead. A wall of
+    reasoning is a poor answer, but an empty chat bubble is a worse one.
+    """
+    cleaned = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<thinking>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip() or text.strip()
 
 
 def _get_token() -> str:

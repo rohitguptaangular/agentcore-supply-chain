@@ -179,11 +179,19 @@ Resources:
   # ---------------------------------------------------------------------------
   # Targets. Each binds one Lambda to one tool schema. The schema is what the
   # agent actually discovers — a target without one is a target with no tools.
+  #
+  # TARGET NAMES MUST NOT CONTAIN HYPHENS. The gateway composes tool names as
+  # "<target>___<tool>", and Amazon Nova cannot handle a hyphen in a tool name:
+  # it emits a malformed tool-use sequence and the whole turn dies with
+  #   modelStreamErrorException: Model produced invalid sequence as part of ToolUse
+  # Bedrock's own toolSpec schema accepts hyphens, so nothing validates this —
+  # it only shows up at runtime. Verified by isolation: inventory___list_products
+  # works, inventory-target___list_products does not.
   # ---------------------------------------------------------------------------
   InventoryTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
     Properties:
-      Name: inventory-target
+      Name: inventory
       GatewayIdentifier: !Ref Gateway
       Description: Inventory lookups backed by DynamoDB
       CredentialProviderConfigurations:
@@ -200,7 +208,7 @@ Resources:
   SupplierTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
     Properties:
-      Name: supplier-target
+      Name: supplier
       GatewayIdentifier: !Ref Gateway
       Description: Supplier records and sourcing
       CredentialProviderConfigurations:
@@ -219,7 +227,7 @@ Resources:
   LogisticsTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
     Properties:
-      Name: logistics-target
+      Name: logistics
       GatewayIdentifier: !Ref Gateway
       Description: Shipment tracking and routing
       CredentialProviderConfigurations:
@@ -236,7 +244,7 @@ Resources:
   QualityTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
     Properties:
-      Name: quality-target
+      Name: quality
       GatewayIdentifier: !Ref Gateway
       Description: Inspections, compliance and standards
       CredentialProviderConfigurations:

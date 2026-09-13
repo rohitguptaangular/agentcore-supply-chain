@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
 
 LOG = logging.getLogger(__name__)
 
@@ -70,9 +70,9 @@ def _retrieve(namespace: str, query: str) -> list[str]:
             namespace=namespace,
             searchCriteria={"searchQuery": query, "topK": TOP_K},
         )
-    except ClientError as exc:
-        # A namespace with nothing in it yet is normal, especially in the first
-        # minute of a conversation. Never let a memory miss break the turn.
+    except Exception as exc:  # noqa: BLE001
+        # An empty namespace is normal, especially in the first minute of a
+        # conversation. A memory miss must never break the turn.
         LOG.warning("Could not read namespace %s: %s", namespace, exc)
         return []
 
@@ -101,6 +101,10 @@ def remember(actor_id: str, session_id: str, user_text: str, assistant_text: str
             memoryId=MEMORY_ID,
             actorId=actor_id,
             sessionId=session_id,
+            # Required by the API. Supplied by the caller rather than the
+            # service so that a retry re-records the moment the exchange
+            # happened, not the moment it was successfully written.
+            eventTimestamp=datetime.now(timezone.utc),
             payload=[
                 {"conversational": {"role": "USER", "content": {"text": user_text}}},
                 {
@@ -112,9 +116,11 @@ def remember(actor_id: str, session_id: str, user_text: str, assistant_text: str
             ],
         )
         LOG.info("Recorded turn for actor %s session %s", actor_id, session_id)
-    except ClientError as exc:
-        # Losing a memory write is regrettable; failing the user's request
-        # because of it is worse. Log and carry on.
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately broad. This runs after the answer is already produced,
+        # so anything raised here would throw away a good response over a
+        # failed bookkeeping call. ClientError alone is not enough: a bad
+        # request shape raises ParamValidationError, which is not a subclass.
         LOG.warning("Could not write memory event: %s", exc)
 
 
@@ -130,7 +136,9 @@ def as_prompt_section(memories: list[str]) -> str:
     bullets = "\n".join(f"- {memory}" for memory in memories)
     return (
         "\n\nWhat you remember about this user from previous conversations. "
-        "Treat these as recollections that may be out of date, not as facts to "
-        "assert:\n"
+        "Use these naturally — do not ask the user to confirm things you "
+        "already remember, such as their name or how they like answers "
+        "formatted. Do re-check anything that changes over time, like "
+        "quantities, statuses or dates, with a tool before stating it:\n"
         f"{bullets}"
     )

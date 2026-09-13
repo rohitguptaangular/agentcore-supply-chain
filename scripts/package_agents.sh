@@ -2,33 +2,59 @@
 #
 # Package the two agent runtimes and upload them to the artifacts bucket.
 #
-# AgentCore direct code deployment takes a .zip containing an entrypoint .py
-# that uses @app.entrypoint (or implements POST /invocations and GET /ping),
-# alongside a requirements.txt describing its dependencies. The runtime
-# resolves those dependencies when it builds the agent, so the zip stays small
-# and we avoid vendoring wheels for an architecture we are not building on.
+# AgentCore direct code deployment takes a .zip with an entrypoint .py at the
+# archive root that uses @app.entrypoint (or serves POST /invocations and
+# GET /ping). It does NOT install requirements.txt for you — a zip containing
+# only source fails at startup with:
 #
-# If a future runtime version stops resolving requirements.txt, set
-# VENDOR_DEPS=1 to pip install into the zip instead.
+#   ModuleNotFoundError: No module named 'bedrock_agentcore'
 #
-# Usage: package_agents.sh <artifacts-bucket> <region>
+# and, because a crashing container never finishes booting, the invocation
+# surfaces as a confusing "Runtime initialization time exceeded" rather than an
+# import error. So dependencies are vendored into the zip.
+#
+# Two details that cost an afternoon to find:
+#
+#   * The runtimes are Linux aarch64. Wheels must be resolved for that platform
+#     from whatever machine is building, hence the explicit --platform and
+#     --only-binary flags rather than a plain pip install.
+#
+#   * Do NOT delete *.dist-info to save space. Several libraries read their own
+#     version at import time via importlib.metadata, and without the metadata
+#     directory they raise PackageNotFoundError. Only __pycache__ and console
+#     scripts are safe to strip.
+#
+# Usage: package_agents.sh <artifacts-bucket> [region]
 
 set -euo pipefail
 
 BUCKET="${1:?artifacts bucket required}"
 REGION="${2:-us-east-1}"
-VENDOR_DEPS="${VENDOR_DEPS:-0}"
+
+# The runtime platform to resolve wheels for. Override only if AWS changes the
+# architecture AgentCore runs on.
+PLATFORM="${PLATFORM:-manylinux2014_aarch64}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.13}"
+
+# Set SKIP_VENDOR=1 to ship source only. Useful when iterating on agent code
+# with unchanged dependencies, since it turns a 28 MB upload into a 20 KB one.
+SKIP_VENDOR="${SKIP_VENDOR:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${ROOT}/build/agents"
+VENDOR="${ROOT}/build/vendor"
 
-rm -rf "${BUILD}"
+# Prefer the project venv's pip so the build does not depend on whatever
+# happens to be on PATH.
+PIP="${ROOT}/.venv/bin/pip"
+[[ -x "${PIP}" ]] || PIP="python3 -m pip"
+
 mkdir -p "${BUILD}"
 
 package_agent() {
   local name="$1"
   local source_dir="${ROOT}/src/agents/${name}"
-  local stage="${BUILD}/${name}"
+  local stage="${VENDOR}/${name}"
   local zip_path="${BUILD}/${name}.zip"
 
   echo "==> Packaging ${name}"
@@ -38,23 +64,33 @@ package_agent() {
     exit 1
   fi
 
-  mkdir -p "${stage}"
-  # Copy the Python sources and the dependency manifest, nothing else.
-  find "${source_dir}" -maxdepth 1 -type f \
-    \( -name '*.py' -o -name 'requirements.txt' \) \
-    -exec cp {} "${stage}/" \;
-
-  if [[ "${VENDOR_DEPS}" == "1" ]]; then
-    echo "    Vendoring dependencies into the zip"
-    python3 -m pip install \
+  if [[ "${SKIP_VENDOR}" == "1" && -d "${stage}" ]]; then
+    echo "    reusing vendored dependencies (SKIP_VENDOR=1)"
+  else
+    rm -rf "${stage}"
+    mkdir -p "${stage}"
+    echo "    resolving dependencies for ${PLATFORM} / py${PYTHON_VERSION}"
+    ${PIP} install \
       --requirement "${source_dir}/requirements.txt" \
       --target "${stage}" \
-      --quiet \
-      --disable-pip-version-check
+      --platform "${PLATFORM}" \
+      --python-version "${PYTHON_VERSION}" \
+      --only-binary=:all: \
+      --quiet --disable-pip-version-check
+
+    # Safe to remove: compiled caches for the wrong interpreter, and console
+    # entry points nothing invokes. *.dist-info stays — see the header.
+    find "${stage}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "${stage}/bin"
   fi
 
-  # -r recurse, -q quiet. Zipping from inside the stage directory keeps
-  # main.py at the archive root, which is where the entrypoint must be.
+  # Source last, so it overwrites anything a dependency happens to shadow.
+  cp "${source_dir}"/*.py "${stage}/"
+  cp "${source_dir}/requirements.txt" "${stage}/"
+
+  rm -f "${zip_path}"
+  # Zipped from inside the stage directory so main.py sits at the archive root,
+  # which is where the entry point must be.
   (cd "${stage}" && zip -rq "${zip_path}" .)
 
   echo "    $(du -h "${zip_path}" | cut -f1) -> s3://${BUCKET}/agents/${name}.zip"
@@ -65,4 +101,7 @@ package_agent() {
 package_agent orchestrator
 package_agent kb_specialist
 
+echo
 echo "Agents packaged and uploaded."
+echo "A runtime does not re-read its zip automatically — run 'make deploy', or"
+echo "update the runtime, to roll a new version that picks this up."
