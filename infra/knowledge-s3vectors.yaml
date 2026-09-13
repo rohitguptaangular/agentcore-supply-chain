@@ -64,6 +64,19 @@ Resources:
       DataType: float32
       Dimension: !Ref EmbeddingDimension
       DistanceMetric: !Ref DistanceMetric
+      # Every metadata key is filterable by default, and filterable metadata is
+      # capped at 2 KB per vector. Bedrock stores each chunk's own text under
+      # AMAZON_BEDROCK_TEXT, which is routinely larger than that, so ingestion
+      # fails with "Filterable metadata must have at most 2048 bytes" unless
+      # the key is declared non-filterable here. Non-filterable metadata is
+      # returned with a match but cannot be queried on — exactly what you want
+      # for body text, which you read back rather than filter by.
+      #
+      # This cannot be changed later: altering it requires a new index and a
+      # full re-ingestion.
+      MetadataConfiguration:
+        NonFilterableMetadataKeys:
+          - AMAZON_BEDROCK_TEXT
 
   # ---------------------------------------------------------------------------
   # The knowledge base role. Narrower than the OpenSearch equivalent: there is
