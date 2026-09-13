@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  API layer — the chat handler Lambda behind an HTTP API.
+
+  The browser cannot call an agent runtime directly: it has no AWS credentials,
+  AgentCore does not speak CORS, and the Cognito client secret must never reach
+  client-side code. This Lambda is the airlock. It holds the secret, exchanges
+  it for a short-lived token, invokes the orchestrator, and returns plain JSON.
+
+Parameters:
+  ProjectName:
+    Type: String
+  OrchestratorRuntimeArn:
+    Type: String
+  CognitoDomain:
+    Type: String
+  MachineClientId:
+    Type: String
+  UserPoolId:
+    Type: String
+
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      Wide open by default so the CloudFront URL works without a second deploy.
+      Narrow this to the distribution domain once you know it — see
+      docs/runbook.md.
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub "${ProjectName}-chat-api"
+      # CORS is handled by API Gateway rather than in Lambda code so that
+      # preflight OPTIONS requests never pay for a Lambda invocation.
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref AllowedOrigin
+        AllowHeaders:
+          - content-type
+        AllowMethods:
+          - POST
+          - OPTIONS
+        MaxAge: 600
+      # Throttling at the edge: an agent turn costs real money, so this is the
+      # cheapest place to stop an accidental loop or a crawler.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-chat-handler"
+      CodeUri: ../src/lambdas/chat_handler
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures: [arm64]
+      MemorySize: 512
+      # HTTP API enforces a hard 30 second integration timeout, so there is no
+      # point allowing the function to run longer than 29. Agent turns that
+      # need more than that require response streaming through a Lambda
+      # Function URL instead — noted in docs/architecture.md as the known
+      # limitation of this design.
+      Timeout: 29
+      Environment:
+        Variables:
+          ORCHESTRATOR_RUNTIME_ARN: !Ref OrchestratorRuntimeArn
+          COGNITO_DOMAIN: !Ref CognitoDomain
+          COGNITO_CLIENT_ID: !Ref MachineClientId
+          COGNITO_USER_POOL_ID: !Ref UserPoolId
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            # Read its own client secret at invocation time. The secret is
+            # deliberately not an environment variable — env vars are visible
+            # to anyone with console read access to the function.
+            - Sid: ReadClientSecret
+              Effect: Allow
+              Action: cognito-idp:DescribeUserPoolClient
+              Resource: !Sub "arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+            # Invoke the orchestrator. The IAM permission is only half the
+            # story — the runtime also validates the JWT this function
+            # presents, which is why both layers exist.
+            - Sid: InvokeOrchestrator
+              Effect: Allow
+              Action: bedrock-agentcore:InvokeAgentRuntime
+              Resource:
+                - !Ref OrchestratorRuntimeArn
+                - !Sub "${OrchestratorRuntimeArn}/runtime-endpoint/*"
+      Events:
+        Chat:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /chat
+            Method: POST
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /health
+            Method: GET
+
+  # Explicit log group so retention is controlled. Without this, Lambda creates
+  # one that never expires and quietly accrues storage charges forever.
+  ChatFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ChatFunction}"
+      RetentionInDays: 14
+
+Outputs:
+  ApiEndpoint:
+    Description: Base URL. The frontend posts to {ApiEndpoint}/chat.
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  ChatFunctionName:
+    Value: !Ref ChatFunction
