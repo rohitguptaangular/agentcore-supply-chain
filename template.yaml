@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Supply Chain AI Assistant on Amazon Bedrock AgentCore — root stack.
+  Composes network, data, auth, tools, knowledge, guardrails, agents, API and
+  frontend into one deployable system. See docs/architecture.md for the full map.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: supplychain
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+    Description: Lowercase prefix used to name every resource. Keep it short — AgentCore names are length-limited.
+
+  EnableVpc:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Run both agent runtimes inside a VPC with PrivateLink endpoints.
+      Costs roughly $0.13/hour (NAT gateway + 4 interface endpoints) while deployed.
+      Leave false for day-to-day development; set true to demonstrate the production topology.
+
+  EnableKnowledgeBase:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Provision OpenSearch Serverless, the Bedrock knowledge base and the KB specialist agent.
+      This is the single largest cost in the stack — tear the stack down when you are done.
+
+  OrchestratorModelId:
+    Type: String
+    Default: us.amazon.nova-pro-v1:0
+    Description: Model backing the orchestrator agent.
+
+  SpecialistModelId:
+    Type: String
+    Default: us.amazon.nova-lite-v1:0
+    Description: Model backing the knowledge base specialist agent.
+
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    Description: Embedding model for the knowledge base. Must match the vector index dimensions (1024 for Titan v2).
+
+  ArtifactsBucket:
+    Type: String
+    Description: Bucket holding the packaged agent zips and gateway tool schemas. Created by `make bootstrap`.
+
+  OrchestratorCodeKey:
+    Type: String
+    Default: agents/orchestrator.zip
+
+  SpecialistCodeKey:
+    Type: String
+    Default: agents/kb_specialist.zip
+
+  SchemaPrefix:
+    Type: String
+    Default: schemas
+    Description: Key prefix under which the four *_tools.json gateway schemas are uploaded.
+
+Conditions:
+  UseVpc: !Equals [!Ref EnableVpc, "true"]
+  UseKnowledgeBase: !Equals [!Ref EnableKnowledgeBase, "true"]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Networking — only created when EnableVpc=true.
+  # ---------------------------------------------------------------------------
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: UseVpc
+    Properties:
+      TemplateURL: ./infra/network.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Data — DynamoDB domain tables and the knowledge base document bucket.
+  # ---------------------------------------------------------------------------
+  DataStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/data.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Auth — Cognito user pool, resource server and machine-to-machine client.
+  # ---------------------------------------------------------------------------
+  AuthStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/auth.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Tools — the four domain Lambdas plus the AgentCore Gateway and its targets.
+  # ---------------------------------------------------------------------------
+  ToolsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/tools.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        ArtifactsBucket: !Ref ArtifactsBucket
+        SchemaPrefix: !Ref SchemaPrefix
+        DiscoveryUrl: !GetAtt AuthStack.Outputs.DiscoveryUrl
+        MachineClientId: !GetAtt AuthStack.Outputs.MachineClientId
+        InventoryTable: !GetAtt DataStack.Outputs.InventoryTable
+        SuppliersTable: !GetAtt DataStack.Outputs.SuppliersTable
+        ShipmentsTable: !GetAtt DataStack.Outputs.ShipmentsTable
+        RoutesTable: !GetAtt DataStack.Outputs.RoutesTable
+        InspectionTable: !GetAtt DataStack.Outputs.InspectionTable
+        ComplianceTable: !GetAtt DataStack.Outputs.ComplianceTable
+        StandardsTable: !GetAtt DataStack.Outputs.StandardsTable
+
+  # ---------------------------------------------------------------------------
+  # Knowledge — OpenSearch Serverless collection, vector index and Bedrock KB.
+  # ---------------------------------------------------------------------------
+  KnowledgeStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: UseKnowledgeBase
+    Properties:
+      TemplateURL: ./infra/knowledge.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EmbeddingModelId: !Ref EmbeddingModelId
+        KnowledgeBucketArn: !GetAtt DataStack.Outputs.KnowledgeBucketArn
+        KnowledgeBucketName: !GetAtt DataStack.Outputs.KnowledgeBucketName
+
+  # ---------------------------------------------------------------------------
+  # Guardrails — content, word and sensitive-information policies.
+  # ---------------------------------------------------------------------------
+  GuardrailsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/guardrails.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # Agents — AgentCore Memory plus the orchestrator and KB specialist runtimes.
+  # ---------------------------------------------------------------------------
+  AgentsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/agents.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        ArtifactsBucket: !Ref ArtifactsBucket
+        OrchestratorCodeKey: !Ref OrchestratorCodeKey
+        SpecialistCodeKey: !Ref SpecialistCodeKey
+        OrchestratorModelId: !Ref OrchestratorModelId
+        SpecialistModelId: !Ref SpecialistModelId
+        DiscoveryUrl: !GetAtt AuthStack.Outputs.DiscoveryUrl
+        MachineClientId: !GetAtt AuthStack.Outputs.MachineClientId
+        CognitoDomain: !GetAtt AuthStack.Outputs.CognitoDomain
+        UserPoolId: !GetAtt AuthStack.Outputs.UserPoolId
+        GatewayUrl: !GetAtt ToolsStack.Outputs.GatewayUrl
+        GuardrailId: !GetAtt GuardrailsStack.Outputs.GuardrailId
+        EnableKnowledgeBase: !Ref EnableKnowledgeBase
+        KnowledgeBaseId: !If [UseKnowledgeBase, !GetAtt KnowledgeStack.Outputs.KnowledgeBaseId, ""]
+        EnableVpc: !Ref EnableVpc
+        PrivateSubnetIds: !If [UseVpc, !GetAtt NetworkStack.Outputs.PrivateSubnetIds, ""]
+        SecurityGroupId: !If [UseVpc, !GetAtt NetworkStack.Outputs.SecurityGroupId, ""]
+
+  # ---------------------------------------------------------------------------
+  # API — the chat handler Lambda fronted by an HTTP API.
+  # ---------------------------------------------------------------------------
+  ApiStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/api.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        OrchestratorRuntimeArn: !GetAtt AgentsStack.Outputs.OrchestratorRuntimeArn
+        CognitoDomain: !GetAtt AuthStack.Outputs.CognitoDomain
+        MachineClientId: !GetAtt AuthStack.Outputs.MachineClientId
+        UserPoolId: !GetAtt AuthStack.Outputs.UserPoolId
+
+  # ---------------------------------------------------------------------------
+  # Frontend — S3 origin behind CloudFront serving the chat UI.
+  # ---------------------------------------------------------------------------
+  FrontendStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./infra/frontend.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+Outputs:
+  ChatUrl:
+    Description: Open this in a browser to use the assistant.
+    Value: !GetAtt FrontendStack.Outputs.DistributionUrl
+
+  ApiEndpoint:
+    Description: HTTP API base URL. The frontend posts to {ApiEndpoint}/chat.
+    Value: !GetAtt ApiStack.Outputs.ApiEndpoint
+
+  FrontendBucket:
+    Description: Bucket the static site is published to by `make frontend`.
+    Value: !GetAtt FrontendStack.Outputs.BucketName
+
+  DistributionId:
+    Description: Used by `make frontend` to invalidate the CloudFront cache.
+    Value: !GetAtt FrontendStack.Outputs.DistributionId
+
+  KnowledgeBucket:
+    Description: Upload knowledge base documents here, then run `make seed`.
+    Value: !GetAtt DataStack.Outputs.KnowledgeBucketName
+
+  UserPoolId:
+    Value: !GetAtt AuthStack.Outputs.UserPoolId
+
+  MachineClientId:
+    Value: !GetAtt AuthStack.Outputs.MachineClientId
+
+  CognitoDomain:
+    Value: !GetAtt AuthStack.Outputs.CognitoDomain
+
+  GatewayUrl:
+    Description: AgentCore Gateway MCP endpoint the orchestrator discovers tools from.
+    Value: !GetAtt ToolsStack.Outputs.GatewayUrl
+
+  OrchestratorRuntimeArn:
+    Value: !GetAtt AgentsStack.Outputs.OrchestratorRuntimeArn
+
+  MemoryId:
+    Value: !GetAtt AgentsStack.Outputs.MemoryId
+
+  GuardrailId:
+    Value: !GetAtt GuardrailsStack.Outputs.GuardrailId
+
+  KnowledgeBaseId:
+    Condition: UseKnowledgeBase
+    Value: !GetAtt KnowledgeStack.Outputs.KnowledgeBaseId
+
+  DataSourceId:
+    Condition: UseKnowledgeBase
+    Description: Pass to `aws bedrock-agent start-ingestion-job` to index new documents.
+    Value: !GetAtt KnowledgeStack.Outputs.DataSourceId

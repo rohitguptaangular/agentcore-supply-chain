@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Data layer — seven DynamoDB domain tables behind the gateway tools, plus the
+  S3 bucket holding knowledge base source documents.
+
+Parameters:
+  ProjectName:
+    Type: String
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Domain tables. One partition key each, on-demand billing so an idle stack
+  # costs nothing. Keys are chosen to match the tool signatures in schemas/.
+  # ---------------------------------------------------------------------------
+  InventoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-inventory"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: product_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: product_id
+          KeyType: HASH
+
+  SuppliersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-suppliers"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: supplier_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: supplier_id
+          KeyType: HASH
+
+  ShipmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-shipments"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: shipment_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: shipment_id
+          KeyType: HASH
+
+  RoutesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-routes"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: route_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: route_id
+          KeyType: HASH
+
+  InspectionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-inspection"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: inspection_id
+          AttributeType: S
+        - AttributeName: product_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: inspection_id
+          KeyType: HASH
+      # check_quality() looks up by product_id or batch_id, not by inspection_id,
+      # so the product dimension needs its own index.
+      GlobalSecondaryIndexes:
+        - IndexName: product-index
+          KeySchema:
+            - AttributeName: product_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ComplianceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-compliance"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: entity_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: entity_id
+          KeyType: HASH
+
+  StandardsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-standards"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: product_category
+          AttributeType: S
+      KeySchema:
+        - AttributeName: product_category
+          KeyType: HASH
+
+  # ---------------------------------------------------------------------------
+  # Knowledge base source documents. The Bedrock KB data source reads from here.
+  # ---------------------------------------------------------------------------
+  KnowledgeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-knowledge-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+Outputs:
+  InventoryTable:
+    Value: !Ref InventoryTable
+  SuppliersTable:
+    Value: !Ref SuppliersTable
+  ShipmentsTable:
+    Value: !Ref ShipmentsTable
+  RoutesTable:
+    Value: !Ref RoutesTable
+  InspectionTable:
+    Value: !Ref InspectionTable
+  ComplianceTable:
+    Value: !Ref ComplianceTable
+  StandardsTable:
+    Value: !Ref StandardsTable
+  KnowledgeBucketName:
+    Value: !Ref KnowledgeBucket
+  KnowledgeBucketArn:
+    Value: !GetAtt KnowledgeBucket.Arn

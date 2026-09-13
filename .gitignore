@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+dist/
+*.zip
+packaged.yaml
+packaged-*.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local config — never commit account-specific values
+.env
+samconfig.local.toml
+outputs.json
+
+# Generated from stack outputs at deploy time (see frontend/config.example.js)
+frontend/config.js
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
