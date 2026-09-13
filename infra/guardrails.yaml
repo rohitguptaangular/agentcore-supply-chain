@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Safety layer — a Bedrock guardrail applied to the orchestrator's model calls.
+
+  A guardrail is an independent evaluation pass over both the prompt and the
+  response. It is deliberately not part of the system prompt: a prompt is a
+  suggestion the model can be argued out of, whereas a guardrail is enforced
+  outside the model and cannot be talked around.
+
+  Four policies are configured here, in the order they tend to matter:
+    content  — categorical harm filters
+    word     — an exact-match deny list plus AWS's profanity list
+    regex    — masks anything shaped like an internal discount code
+    PII      — masks usernames, blocks passwords
+
+Parameters:
+  ProjectName:
+    Type: String
+
+  SecretProjectName:
+    Type: String
+    Default: Project Meridian
+    Description: >
+      An internal codename the assistant must never discuss. Stand-in for the
+      real thing every company has — an unannounced product, an acquisition.
+
+  DiscountCodePattern:
+    Type: String
+    Default: "DISC-[A-Z]{3}-\\d{4}"
+    Description: >
+      Regex for supplier discount codes. Masked rather than blocked so the
+      surrounding answer still reaches the user with the code redacted.
+
+Resources:
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub "${ProjectName}-guardrail"
+      Description: Content, confidentiality and PII controls for the supply chain assistant
+
+      # Shown to the user when a policy trips. Worth writing deliberately:
+      # this text is the assistant's voice in its least graceful moment, and a
+      # generic "blocked" message makes a working system look broken.
+      BlockedInputMessaging: >-
+        I can't help with that request. If you were asking about inventory,
+        suppliers, shipments or quality, try rephrasing and I'll look it up.
+      BlockedOutputsMessaging: >-
+        I found an answer but it contained restricted information, so I can't
+        share it. Ask me something narrower and I'll try again.
+
+      # -----------------------------------------------------------------------
+      # Categorical harm filters. HIGH is the strictest setting and applies to
+      # both directions — the prompt AND the model's response.
+      #
+      # PROMPT_ATTACK is input-only by definition: it detects jailbreak and
+      # prompt-injection attempts, which is a property of an input, so setting
+      # an output strength on it is invalid.
+      # -----------------------------------------------------------------------
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: HATE
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: INSULTS
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: MISCONDUCT
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: VIOLENCE
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: PROMPT_ATTACK
+            InputStrength: HIGH
+            OutputStrength: NONE
+
+      # -----------------------------------------------------------------------
+      # Exact-match deny list. Cheap, deterministic, and the right tool for a
+      # known codename — unlike a denied-topic policy, which is model-evaluated
+      # and can be coaxed.
+      # -----------------------------------------------------------------------
+      WordPolicyConfig:
+        WordsConfig:
+          - Text: !Ref SecretProjectName
+        ManagedWordListsConfig:
+          - Type: PROFANITY
+
+      # -----------------------------------------------------------------------
+      # Sensitive information. Note the two different actions:
+      #
+      #   ANONYMIZE — replaces the match, the rest of the answer survives
+      #   BLOCK     — refuses the whole response
+      #
+      # Discount codes and usernames are masked because the surrounding answer
+      # is still useful. A password appearing at all is a failure serious
+      # enough that the safe move is to say nothing.
+      #
+      # This policy runs on OUTPUT too, which is the important half: it is what
+      # stops the assistant leaking a secret it legitimately retrieved from
+      # your own database.
+      # -----------------------------------------------------------------------
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: USERNAME
+            Action: ANONYMIZE
+          - Type: PASSWORD
+            Action: BLOCK
+        RegexesConfig:
+          - Name: supplier-discount-code
+            Description: Internal supplier discount codes, e.g. DISC-ABC-1234
+            Pattern: !Ref DiscountCodePattern
+            Action: ANONYMIZE
+
+  # ---------------------------------------------------------------------------
+  # Publishing a version snapshots the policy above as an immutable, numbered
+  # release.
+  #
+  # The trade-off:
+  #   DRAFT     — always reflects the latest edit. Convenient while developing,
+  #               but a policy change silently alters production behaviour.
+  #   a version — pinned and auditable. Changing policy becomes a deliberate
+  #               deploy, which is what you want in production.
+  #
+  # Both are exported. The root stack passes DRAFT by default so that editing
+  # this file and redeploying takes effect immediately; docs/runbook.md covers
+  # switching to a pinned version.
+  # ---------------------------------------------------------------------------
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: Published by CloudFormation
+
+Outputs:
+  GuardrailId:
+    Description: Becomes GUARDRAIL_ID on the orchestrator runtime.
+    Value: !GetAtt Guardrail.GuardrailId
+
+  GuardrailArn:
+    Value: !GetAtt Guardrail.GuardrailArn
+
+  GuardrailVersion:
+    Description: Pinned version number. Use instead of DRAFT for production.
+    Value: !GetAtt GuardrailVersion.Version
