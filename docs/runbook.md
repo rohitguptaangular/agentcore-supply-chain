@@ -33,10 +33,22 @@ uploaded to S3 outside the CloudFormation packaging step.
 ## Switching the feature flags
 
 ```bash
-make deploy ENABLE_VPC=true      # move both runtimes into the VPC
-make deploy ENABLE_VPC=false     # back to public networking
-make deploy ENABLE_KB=false      # tear down OpenSearch and the specialist
+make deploy ENABLE_VPC=true             # move both runtimes into the VPC
+make deploy ENABLE_VPC=false            # back to public networking
+make deploy ENABLE_KB=false             # remove the knowledge base and specialist
+make deploy VECTOR_STORE=opensearch     # swap S3 Vectors for OpenSearch Serverless
+make deploy VECTOR_STORE=s3             # and back again
 ```
+
+Switching `VECTOR_STORE` creates a knowledge base in the new store and deletes
+the old one, so **run `make seed` afterwards** or document questions will
+return nothing. Nothing else in the stack changes — the specialist agent reads
+`KNOWLEDGE_BASE_ID` and doesn't know which store is behind it.
+
+The S3 vector bucket is retained on stack delete, because a vector bucket can
+only be deleted when empty and CloudFormation has no way to empty it. That's
+deliberate — it stops a stuck bucket from stalling `make destroy`. The commands
+to remove it by hand are printed at the end of the destroy.
 
 Moving runtimes between public and VPC mode takes several minutes each and
 creates a new runtime version. Wait for both to report READY before testing, or

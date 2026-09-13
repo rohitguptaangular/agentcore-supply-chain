@@ -79,31 +79,36 @@ collection and the two agent runtimes.
 
 ### Cost
 
-This is the part to pay attention to. Most of the stack is per-request and
-effectively free at demo scale — the agent runtimes, gateway, memory, Lambdas,
-DynamoDB and the models together cost well under a dollar for a day of
-poking at it.
+Almost everything here is per-request and effectively free at demo scale — the
+agent runtimes, gateway, memory, Lambdas, DynamoDB and the models together cost
+well under a dollar for a day of poking at it.
 
-Three things bill by the hour whether you use them or not:
+On the defaults, **nothing bills by the hour at all**, because the knowledge
+base stores its embeddings in S3 Vectors rather than OpenSearch. A full day of
+building costs a couple of dollars, and leaving the stack up overnight costs
+pennies.
 
-| Resource | Roughly |
-|---|---|
-| OpenSearch Serverless (classic collection, 2 OCU floor) | $0.48/hr |
-| NAT gateway (only when `ENABLE_VPC=true`) | $0.045/hr |
-| 4 interface endpoints × 2 AZs (same) | $0.08/hr |
-
-A day of building costs single-digit dollars. Leaving it up for a month costs
-several hundred. **Run `make destroy` when you're done.** I set a $20 billing
-alarm before the first deploy and I'd suggest the same.
-
-Two flags control the expensive parts:
+Two flags turn on the expensive parts:
 
 ```bash
-make deploy ENABLE_VPC=true     # private subnets + PrivateLink, adds ~$0.13/hr
-make deploy ENABLE_KB=false     # skip OpenSearch entirely
+make deploy VECTOR_STORE=opensearch   # OpenSearch Serverless instead of S3 Vectors
+make deploy ENABLE_VPC=true           # private subnets + PrivateLink
+make deploy ENABLE_KB=false           # no knowledge base at all
 ```
 
-Details in [docs/cost.md](docs/cost.md).
+| Flag | Adds |
+|---|---|
+| `VECTOR_STORE=opensearch` | ~$0.48/hr — a classic collection holds a 2 OCU floor, about $350/month if you forget |
+| `ENABLE_VPC=true` | ~$0.13/hr — NAT gateway plus eight endpoint ENIs |
+
+Both vector stores give the same knowledge base behaviour. S3 Vectors queries
+at ~100ms against OpenSearch's single-digit milliseconds, which is invisible
+next to a model call of several seconds. OpenSearch is there because it's what
+most enterprise RAG actually runs on, and because the template that sets it up
+is more interesting.
+
+**Run `make destroy` when you're done anyway.** I set a $20 billing alarm before
+the first deploy and I'd suggest the same. Details in [docs/cost.md](docs/cost.md).
 
 ## Repository layout
 
@@ -114,7 +119,8 @@ infra/                one template per layer
   data.yaml             7 DynamoDB tables, KB document bucket
   auth.yaml             Cognito pool, resource server, M2M client
   tools.yaml            4 domain Lambdas, gateway, 4 targets
-  knowledge.yaml        OpenSearch, vector index, Bedrock KB
+  knowledge-s3vectors.yaml  Bedrock KB over S3 Vectors (default)
+  knowledge.yaml        Bedrock KB over OpenSearch Serverless
   guardrails.yaml       content, word, regex and PII policies
   agents.yaml           memory + both agent runtimes
   api.yaml              chat handler + HTTP API
@@ -131,12 +137,24 @@ docs/
 
 ## Things worth knowing if you read the code
 
-**CloudFormation can't create an OpenSearch index**, but a Bedrock knowledge
-base needs one to already exist. `src/lambdas/opensearch_index/` is a custom
-resource that creates it over the collection's HTTP API. It retries for two
-minutes, because the data access policy is applied moments earlier and takes a
-few seconds to propagate — a 403 straight after stack creation means "not
-allowed yet", not "not allowed".
+**There are two knowledge base templates and they're worth comparing.** The S3
+Vectors one is about 130 lines: a vector bucket, an index, a role, the knowledge
+base. The OpenSearch one is nearly twice that, because a collection needs an
+encryption policy before it can be created, a network policy, a data access
+policy naming every principal, and — since CloudFormation has no resource type
+for an OpenSearch index while Bedrock requires one to already exist — a
+Lambda-backed custom resource to create it over the collection's HTTP API.
+
+That custom resource retries for two minutes, because the data access policy is
+applied moments earlier and takes a few seconds to propagate. A 403 straight
+after stack creation means "not allowed yet", not "not allowed", and telling
+those apart is most of the work in anything eventually consistent.
+
+**OpenSearch Serverless has two independent authorisation layers** and both
+have to allow a call: the IAM policy, and the collection's data access policy.
+IAM alone gets you a 403 that looks exactly like a missing permission. S3
+Vectors has only IAM, which is one of the reasons that template is so much
+shorter.
 
 **Both runtimes use a JWT authorizer, so neither can be invoked with boto3.**
 AWS documents that an OAuth-protected runtime has to be called over HTTPS

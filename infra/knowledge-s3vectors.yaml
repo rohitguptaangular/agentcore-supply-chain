@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Knowledge layer backed by S3 Vectors.
+
+  Same knowledge base as infra/knowledge.yaml, storing embeddings in an S3
+  vector bucket instead of an OpenSearch Serverless collection. There is no
+  hourly compute charge, so an idle stack costs cents rather than ~$350/month.
+
+  It is also a third of the size: S3 Vectors has a CloudFormation resource type
+  for the index itself, so none of the collection security policies or the
+  custom resource in the OpenSearch version are needed here.
+
+  The trade-off is query latency — AWS documents S3 Vectors at 100ms or more
+  against OpenSearch's single-digit milliseconds. Against a model call of
+  several seconds that is not noticeable.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EmbeddingModelId:
+    Type: String
+  KnowledgeBucketArn:
+    Type: String
+  KnowledgeBucketName:
+    Type: String
+
+  EmbeddingDimension:
+    Type: Number
+    Default: 1024
+    Description: Must match the embedding model. Titan Text Embeddings V2 is 1024.
+
+  DistanceMetric:
+    Type: String
+    Default: cosine
+    AllowedValues: [cosine, euclidean]
+    Description: >
+      Cosine similarity is the right default for text embeddings — it compares
+      direction rather than magnitude, so document length does not skew the
+      match.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Vector storage. A vector bucket is not an ordinary S3 bucket: it has its own
+  # API namespace (s3vectors) and is addressed by ARN, not by object key.
+  # ---------------------------------------------------------------------------
+  VectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+    # A vector bucket can only be deleted when empty, and the stack has no way
+    # to empty it. Retaining on delete keeps `make destroy` from stalling;
+    # scripts/... and docs/cost.md cover removing it afterwards.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VectorBucketName: !Sub "${ProjectName}-vectors-${AWS::AccountId}"
+
+  VectorIndex:
+    Type: AWS::S3Vectors::Index
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      IndexName: !Sub "${ProjectName}-kb-index"
+      VectorBucketArn: !GetAtt VectorBucket.VectorBucketArn
+      # float32 is currently the only supported type.
+      DataType: float32
+      Dimension: !Ref EmbeddingDimension
+      DistanceMetric: !Ref DistanceMetric
+
+  # ---------------------------------------------------------------------------
+  # The knowledge base role. Narrower than the OpenSearch equivalent: there is
+  # no separate data access policy to satisfy, just IAM.
+  # ---------------------------------------------------------------------------
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-kb-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+      Policies:
+        - PolicyName: knowledge-base-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadSourceDocuments
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Ref KnowledgeBucketArn
+                  - !Sub "${KnowledgeBucketArn}/*"
+              - Sid: InvokeEmbeddingModel
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+              - Sid: ReadWriteVectors
+                Effect: Allow
+                Action:
+                  - s3vectors:GetIndex
+                  - s3vectors:ListIndexes
+                  - s3vectors:PutVectors
+                  - s3vectors:GetVectors
+                  - s3vectors:QueryVectors
+                  - s3vectors:ListVectors
+                  - s3vectors:DeleteVectors
+                Resource:
+                  - !GetAtt VectorBucket.VectorBucketArn
+                  - !GetAtt VectorIndex.IndexArn
+
+  # ---------------------------------------------------------------------------
+  # The knowledge base. Identical to the OpenSearch version apart from
+  # StorageConfiguration — the chunking, embedding and retrieval behaviour is
+  # the same, which is the point of Bedrock abstracting the vector store.
+  # ---------------------------------------------------------------------------
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub "${ProjectName}-kb"
+      Description: Supply chain procedures, manuals and policies
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+      StorageConfiguration:
+        Type: S3_VECTORS
+        S3VectorsConfiguration:
+          VectorBucketArn: !GetAtt VectorBucket.VectorBucketArn
+          IndexArn: !GetAtt VectorIndex.IndexArn
+
+  # Creating the data source does not index anything. `make seed` starts the
+  # ingestion job that chunks, embeds and writes the vectors.
+  DataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: !Sub "${ProjectName}-documents"
+      Description: !Sub "Markdown documents in s3://${KnowledgeBucketName}"
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !Ref KnowledgeBucketArn
+
+Outputs:
+  KnowledgeBaseId:
+    Description: Becomes KNOWLEDGE_BASE_ID on the KB specialist agent runtime.
+    Value: !Ref KnowledgeBase
+  DataSourceId:
+    Value: !GetAtt DataSource.DataSourceId
+  VectorBucketArn:
+    Value: !GetAtt VectorBucket.VectorBucketArn
+  VectorIndexArn:
+    Value: !GetAtt VectorIndex.IndexArn
+  KnowledgeBaseRoleArn:
+    Value: !GetAtt KnowledgeBaseRole.Arn

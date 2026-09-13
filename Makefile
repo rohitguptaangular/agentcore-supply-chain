@@ -16,9 +16,14 @@ PROJECT        ?= supplychain
 STACK          ?= $(PROJECT)
 REGION         ?= us-east-1
 
-# Cost flags. Both default to the cheap, working configuration.
+# Cost flags. All three default to the cheap, working configuration.
 ENABLE_VPC     ?= false
 ENABLE_KB      ?= true
+
+# s3         S3 Vectors. No hourly charge. ~100ms queries. The default.
+# opensearch OpenSearch Serverless. Faster, but a classic collection bills a
+#            2 OCU floor around the clock — roughly $350/month if left up.
+VECTOR_STORE   ?= s3
 
 ACCOUNT        := $(shell aws sts get-caller-identity --query Account --output text)
 ARTIFACTS      := $(PROJECT)-artifacts-$(ACCOUNT)-$(REGION)
@@ -80,6 +85,7 @@ deploy: ## Package and deploy the whole stack
 			ArtifactsBucket=$(ARTIFACTS) \
 			EnableVpc=$(ENABLE_VPC) \
 			EnableKnowledgeBase=$(ENABLE_KB) \
+			VectorStore=$(VECTOR_STORE) \
 		--no-fail-on-empty-changeset
 	@$(MAKE) --no-print-directory outputs
 
@@ -118,7 +124,13 @@ destroy: ## Delete everything. Buckets are emptied first or the stack will not d
 	@aws cloudformation delete-stack --stack-name $(STACK) --region $(REGION)
 	@echo "Delete requested. Waiting..."
 	@aws cloudformation wait stack-delete-complete --stack-name $(STACK) --region $(REGION)
-	@echo "Stack deleted. The artifacts bucket $(ARTIFACTS) is kept — remove it manually if you are finished."
+	@echo "Stack deleted."
+	@echo "Kept on purpose: the artifacts bucket $(ARTIFACTS), and (on the s3 vector"
+	@echo "store) the vector bucket $(PROJECT)-vectors-$(ACCOUNT) — a vector bucket"
+	@echo "can only be deleted when empty, so it is retained rather than stalling the"
+	@echo "stack delete. Remove both by hand when you are finished for good:"
+	@echo "  aws s3vectors delete-index  --vector-bucket-name $(PROJECT)-vectors-$(ACCOUNT) --index-name $(PROJECT)-kb-index"
+	@echo "  aws s3vectors delete-vector-bucket --vector-bucket-name $(PROJECT)-vectors-$(ACCOUNT)"
 
 clean: ## Remove local build output
 	@rm -rf $(BUILD) frontend/config.js

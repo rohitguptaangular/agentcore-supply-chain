@@ -5,25 +5,36 @@ before trusting them for anything that matters.
 
 ## The short version
 
-A day of building and demoing: **single-digit dollars**.
-Leaving it deployed for a month: **several hundred**.
+**On the defaults, nothing in this stack bills by the hour.** A day of building
+costs a couple of dollars, essentially all of it model tokens, and leaving it
+deployed overnight costs pennies.
 
-The difference is entirely three hourly resources. Everything else in the stack
-is per-request and rounds to nothing at demo scale.
+That is entirely down to `VECTOR_STORE=s3`. Two flags can change it.
 
-## What bills by the hour
+## What bills by the hour, and only if you ask for it
 
-| Resource | Rate | 8 hours | 30 days |
-|---|---|---|---|
-| OpenSearch Serverless, classic collection, 2 OCU floor | ~$0.24/OCU-hr | $3.84 | ~$350 |
-| Same with default redundancy (4 OCU) | | $7.68 | ~$700 |
-| NAT gateway (`ENABLE_VPC=true` only) | $0.045/hr + $0.045/GB | $0.40 | ~$33 |
-| 4 interface endpoints × 2 AZs (same) | $0.01/hr per ENI | $0.64 | ~$58 |
+| Flag | Resource | Rate | 8 hours | 30 days |
+|---|---|---|---|---|
+| *(default)* | S3 Vectors | storage + requests, no hourly charge | ~$0 | ~$0 |
+| `VECTOR_STORE=opensearch` | OpenSearch Serverless, classic, 2 OCU floor | ~$0.24/OCU-hr | $3.84 | ~$350 |
+| | Same with default redundancy (4 OCU) | | $7.68 | ~$700 |
+| `ENABLE_VPC=true` | NAT gateway | $0.045/hr + $0.045/GB | $0.40 | ~$33 |
+| | 4 interface endpoints × 2 AZs | $0.01/hr per ENI | $0.64 | ~$58 |
 
-OpenSearch is the one to watch. If your account offers **NextGen collections**,
-use one — AWS documents no minimum OCU requirement and scale-to-zero after ten
-minutes idle, which changes the idle cost from ~$350/month to roughly nothing.
-Classic collections hold a 2-OCU floor whether or not anything queries them.
+S3 Vectors is priced on stored vectors and requests rather than provisioned
+compute. Four markdown documents is a rounding error — well under a cent a
+month — and AWS rates the index at up to 2 billion vectors, so this stays cheap
+long past the point this demo stops being a demo.
+
+The trade-off is query latency: AWS documents S3 Vectors at 100ms or more
+against OpenSearch's single-digit milliseconds. Since every answer also
+involves a model call taking several seconds, it isn't noticeable here. It
+would matter for a high-QPS search product.
+
+If you do switch to OpenSearch and your account offers **NextGen collections**,
+use one — AWS documents no minimum OCU and scale-to-zero after ten minutes
+idle. Classic collections hold the 2 OCU floor whether or not anything queries
+them.
 
 ## What bills per request
 
@@ -47,16 +58,21 @@ billed for the life of the session.
 
 ## Keeping it cheap
 
-**Leave `ENABLE_VPC=false` unless you're specifically demonstrating the
-networking.** It's ~$0.13/hr for NAT and endpoints, and nothing else about the
-system behaves differently.
+**Stay on `VECTOR_STORE=s3`** unless you specifically want to demonstrate the
+OpenSearch path. Switch to `opensearch` for an afternoon, take your
+screenshots, switch back. Note that switching replaces the knowledge base, so
+`make seed` has to run again afterwards.
 
-**Use `ENABLE_KB=false` if you only care about the tool path.** That skips
-OpenSearch entirely and the stack costs almost nothing to leave running.
+**Leave `ENABLE_VPC=false` unless you're demonstrating the networking.** It's
+~$0.13/hr for NAT and endpoints, and nothing else about the system behaves
+differently. An hour of it costs 13 cents, which is a cheap screenshot.
 
-**Destroy it when you stop.** `make destroy` empties the buckets and deletes
-the stack. If you're coming back tomorrow, it's cheaper to destroy and redeploy
-than to leave OpenSearch running overnight.
+**Use `ENABLE_KB=false` if you only care about the tool path.** Most debugging —
+auth, gateway, tools, memory, guardrails — doesn't involve the knowledge base
+at all.
+
+**Destroy it when you stop anyway.** On the defaults you could leave it up, but
+the habit is worth more than the pennies saved.
 
 **Set a billing alarm before the first deploy.** $20 is a sensible tripwire for
 this stack.

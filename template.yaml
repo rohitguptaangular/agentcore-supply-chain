@@ -28,6 +28,17 @@ Parameters:
       Provision OpenSearch Serverless, the Bedrock knowledge base and the KB specialist agent.
       This is the single largest cost in the stack — tear the stack down when you are done.
 
+  VectorStore:
+    Type: String
+    Default: s3
+    AllowedValues: ["s3", "opensearch"]
+    Description: >
+      Where knowledge base embeddings are stored.
+      s3 — S3 Vectors. No hourly charge, storage-priced, ~100ms query latency.
+      opensearch — OpenSearch Serverless. Single-digit ms, but a classic
+      collection holds a 2 OCU floor costing roughly $350/month whether or not
+      anything queries it. Same knowledge base behaviour either way.
+
   OrchestratorModelId:
     Type: String
     Default: us.amazon.nova-pro-v1:0
@@ -63,6 +74,14 @@ Parameters:
 Conditions:
   UseVpc: !Equals [!Ref EnableVpc, "true"]
   UseKnowledgeBase: !Equals [!Ref EnableKnowledgeBase, "true"]
+  # Exactly one of these is true when the knowledge base is enabled, and
+  # neither is when it is not.
+  UseS3Vectors: !And
+    - !Equals [!Ref EnableKnowledgeBase, "true"]
+    - !Equals [!Ref VectorStore, "s3"]
+  UseOpenSearchVectors: !And
+    - !Equals [!Ref EnableKnowledgeBase, "true"]
+    - !Equals [!Ref VectorStore, "opensearch"]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -118,11 +137,24 @@ Resources:
         StandardsTable: !GetAtt DataStack.Outputs.StandardsTable
 
   # ---------------------------------------------------------------------------
-  # Knowledge — OpenSearch Serverless collection, vector index and Bedrock KB.
+  # Knowledge — the same knowledge base over one of two vector stores. Only the
+  # stack matching VectorStore is created; both expose identical outputs so
+  # nothing downstream knows or cares which one is in use.
   # ---------------------------------------------------------------------------
-  KnowledgeStack:
+  KnowledgeS3Stack:
     Type: AWS::CloudFormation::Stack
-    Condition: UseKnowledgeBase
+    Condition: UseS3Vectors
+    Properties:
+      TemplateURL: ./infra/knowledge-s3vectors.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EmbeddingModelId: !Ref EmbeddingModelId
+        KnowledgeBucketArn: !GetAtt DataStack.Outputs.KnowledgeBucketArn
+        KnowledgeBucketName: !GetAtt DataStack.Outputs.KnowledgeBucketName
+
+  KnowledgeOpenSearchStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: UseOpenSearchVectors
     Properties:
       TemplateURL: ./infra/knowledge.yaml
       Parameters:
@@ -162,7 +194,13 @@ Resources:
         GatewayUrl: !GetAtt ToolsStack.Outputs.GatewayUrl
         GuardrailId: !GetAtt GuardrailsStack.Outputs.GuardrailId
         EnableKnowledgeBase: !Ref EnableKnowledgeBase
-        KnowledgeBaseId: !If [UseKnowledgeBase, !GetAtt KnowledgeStack.Outputs.KnowledgeBaseId, ""]
+        KnowledgeBaseId: !If
+          - UseS3Vectors
+          - !GetAtt KnowledgeS3Stack.Outputs.KnowledgeBaseId
+          - !If
+            - UseOpenSearchVectors
+            - !GetAtt KnowledgeOpenSearchStack.Outputs.KnowledgeBaseId
+            - ""
         EnableVpc: !Ref EnableVpc
         PrivateSubnetIds: !If [UseVpc, !GetAtt NetworkStack.Outputs.PrivateSubnetIds, ""]
         SecurityGroupId: !If [UseVpc, !GetAtt NetworkStack.Outputs.SecurityGroupId, ""]
@@ -236,9 +274,20 @@ Outputs:
 
   KnowledgeBaseId:
     Condition: UseKnowledgeBase
-    Value: !GetAtt KnowledgeStack.Outputs.KnowledgeBaseId
+    Value: !If
+      - UseS3Vectors
+      - !GetAtt KnowledgeS3Stack.Outputs.KnowledgeBaseId
+      - !GetAtt KnowledgeOpenSearchStack.Outputs.KnowledgeBaseId
 
   DataSourceId:
     Condition: UseKnowledgeBase
     Description: Pass to `aws bedrock-agent start-ingestion-job` to index new documents.
-    Value: !GetAtt KnowledgeStack.Outputs.DataSourceId
+    Value: !If
+      - UseS3Vectors
+      - !GetAtt KnowledgeS3Stack.Outputs.DataSourceId
+      - !GetAtt KnowledgeOpenSearchStack.Outputs.DataSourceId
+
+  VectorStoreInUse:
+    Condition: UseKnowledgeBase
+    Description: Which vector store backs the knowledge base in this deployment.
+    Value: !Ref VectorStore
