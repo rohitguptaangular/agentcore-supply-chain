@@ -13,7 +13,12 @@ knowledge base has a data source pointing at files it has never read. That is
 exactly what the console's "Sync" button does.
 
 Usage:
+    # against a deployed stack, resolving everything from its outputs
     python3 scripts/seed.py --stack supplychain --region us-east-1
+
+    # against resources built by hand in the console
+    python3 scripts/seed.py --project sc --bucket sc-knowledge-123456789012-us-east-1 \\
+        --knowledge-base-id ABCD1234 --data-source-id EFGH5678
 """
 
 from __future__ import annotations
@@ -50,26 +55,41 @@ INGESTION_MAX_WAIT_SECONDS = 900
 def main() -> int:
     args = parse_args()
 
-    cloudformation = boto3.client("cloudformation", region_name=args.region)
-    outputs, parameters = describe_stack(cloudformation, args.stack)
+    if args.stack:
+        cloudformation = boto3.client("cloudformation", region_name=args.region)
+        outputs, parameters = describe_stack(cloudformation, args.stack)
 
-    project = parameters.get("ProjectName", args.stack)
-    print(f"Stack {args.stack} (project {project}) in {args.region}\n")
+        project = parameters.get("ProjectName", args.stack)
+        bucket = outputs.get("KnowledgeBucket")
+        knowledge_base_id = outputs.get("KnowledgeBaseId")
+        data_source_id = outputs.get("DataSourceId")
+        print(f"Stack {args.stack} (project {project}) in {args.region}\n")
+    else:
+        # Resources built by hand in the console rather than by CloudFormation.
+        project = args.project
+        bucket = args.bucket
+        knowledge_base_id = args.knowledge_base_id
+        data_source_id = args.data_source_id
+        print(f"Project prefix {project} in {args.region}\n")
 
     seed_tables(args.region, project)
 
-    bucket = outputs.get("KnowledgeBucket")
     if not bucket:
-        print("\nNo KnowledgeBucket output — knowledge base is disabled. Done.")
+        print("\nNo knowledge bucket given — skipping documents. Done.")
         return 0
 
     upload_documents(args.region, bucket)
 
-    knowledge_base_id = outputs.get("KnowledgeBaseId")
-    data_source_id = outputs.get("DataSourceId")
+    if args.skip_ingestion:
+        print("\n--skip-ingestion set. Run a sync from the console when ready.")
+        return 0
 
     if not knowledge_base_id or not data_source_id:
-        print("\nNo knowledge base deployed — skipping ingestion.")
+        print(
+            "\nNo knowledge base id or data source id given — documents are "
+            "uploaded but not indexed. Sync from the Bedrock console, or rerun "
+            "with --knowledge-base-id and --data-source-id."
+        )
         return 0
 
     return start_ingestion(args.region, knowledge_base_id, data_source_id)
@@ -77,14 +97,31 @@ def main() -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stack", required=True)
+    parser.add_argument(
+        "--stack",
+        help="CloudFormation stack to read resource names from. Omit when the "
+        "resources were created by hand, and pass --project instead.",
+    )
+    parser.add_argument(
+        "--project",
+        help="Table name prefix, e.g. 'sc' for sc-inventory. Used without --stack.",
+    )
+    parser.add_argument("--bucket", help="Knowledge base document bucket.")
+    parser.add_argument("--knowledge-base-id")
+    parser.add_argument("--data-source-id")
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument(
         "--skip-ingestion",
         action="store_true",
         help="Upload documents but do not start an ingestion job.",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    if not args.stack and not args.project:
+        parser.error("pass either --stack or --project")
+
+    return args
 
 
 def describe_stack(client, stack: str) -> tuple[dict, dict]:
