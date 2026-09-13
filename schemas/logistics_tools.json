@@ -1,0 +1,44 @@
+[
+  {
+    "name": "list_shipments",
+    "description": "List all shipments with their current status, origin, destination, carrier and estimated arrival date. Use this for broad questions about shipments or deliveries in transit.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Optional status filter, for example 'IN_TRANSIT', 'DELAYED' or 'DELIVERED'."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "get_shipment",
+    "description": "Retrieve a single shipment by its shipment identifier, including the route it is travelling on.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "shipment_id": {
+          "type": "string",
+          "description": "The shipment identifier, for example 'SHP-001'."
+        }
+      },
+      "required": ["shipment_id"]
+    }
+  },
+  {
+    "name": "get_route",
+    "description": "Retrieve a shipping route by its route identifier, including transit days, distance and transport mode.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "route_id": {
+          "type": "string",
+          "description": "The route identifier, for example 'RTE-001'."
+        }
+      },
+      "required": ["route_id"]
+    }
+  }
+]

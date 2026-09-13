@@ -1,0 +1,53 @@
+[
+  {
+    "name": "check_quality",
+    "description": "Retrieve quality inspection records for a specific product or batch, including the inspection result, defect count and inspector. Requires either a product identifier or a batch identifier.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "product_id": {
+          "type": "string",
+          "description": "The product identifier to inspect, for example 'PROD-001'."
+        },
+        "batch_id": {
+          "type": "string",
+          "description": "The batch identifier to inspect, for example 'BATCH-2201'."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "get_compliance",
+    "description": "Return the compliance status of a supplier, product or facility, including certifications held and the next audit date.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "entity_id": {
+          "type": "string",
+          "description": "The identifier of the entity to check, for example 'SUP-001' or 'PROD-003'."
+        },
+        "entity_type": {
+          "type": "string",
+          "description": "The kind of entity being checked.",
+          "enum": ["SUPPLIER", "PRODUCT", "FACILITY"]
+        }
+      },
+      "required": ["entity_id"]
+    }
+  },
+  {
+    "name": "get_standards",
+    "description": "Retrieve the quality standards that apply to a product category, including tolerance thresholds and the governing specification.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "product_category": {
+          "type": "string",
+          "description": "The product category, for example 'Electrical', 'Fasteners' or 'Hydraulics'."
+        }
+      },
+      "required": ["product_category"]
+    }
+  }
+]

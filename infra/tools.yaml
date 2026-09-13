@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Tools layer — the four domain Lambda functions, the AgentCore Gateway that
+  exposes them over MCP, and one gateway target per domain.
+
+  This is the layer the lab broke three ways: the logistics target pointed at
+  the inventory Lambda, the quality target did not exist, and a target created
+  without a tool schema silently exposes zero tools. Declaring targets alongside
+  their schemas makes all three impossible.
+
+Parameters:
+  ProjectName:
+    Type: String
+  ArtifactsBucket:
+    Type: String
+  SchemaPrefix:
+    Type: String
+  DiscoveryUrl:
+    Type: String
+  MachineClientId:
+    Type: String
+  InventoryTable:
+    Type: String
+  SuppliersTable:
+    Type: String
+  ShipmentsTable:
+    Type: String
+  RoutesTable:
+    Type: String
+  InspectionTable:
+    Type: String
+  ComplianceTable:
+    Type: String
+  StandardsTable:
+    Type: String
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Handler: app.lambda_handler
+    Timeout: 30
+    MemorySize: 256
+    Architectures: [arm64]
+    Layers: [!Ref CommonLayer]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Shared layer: the gateway-to-Lambda calling convention lives here so all
+  # four handlers stay tiny. See src/lambdas/common/python/agentcore_tools.py.
+  # ---------------------------------------------------------------------------
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${ProjectName}-agentcore-tools"
+      Description: Gateway tool dispatch helpers shared by the domain handlers
+      ContentUri: ../src/lambdas/common
+      CompatibleRuntimes: [python3.13]
+      CompatibleArchitectures: [arm64]
+    Metadata:
+      BuildMethod: python3.13
+
+  # ---------------------------------------------------------------------------
+  # Domain handlers. Each owns its own tables and nothing else — the blast
+  # radius of a bad tool call is one domain.
+  # ---------------------------------------------------------------------------
+  InventoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-inventory-handler"
+      CodeUri: ../src/lambdas/inventory_handler
+      Environment:
+        Variables:
+          INVENTORY_TABLE: !Ref InventoryTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref InventoryTable
+
+  SupplierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-supplier-handler"
+      CodeUri: ../src/lambdas/supplier_handler
+      Environment:
+        Variables:
+          SUPPLIERS_TABLE: !Ref SuppliersTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SuppliersTable
+
+  LogisticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-logistics-handler"
+      CodeUri: ../src/lambdas/logistics_handler
+      Environment:
+        Variables:
+          SHIPMENTS_TABLE: !Ref ShipmentsTable
+          ROUTES_TABLE: !Ref RoutesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ShipmentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref RoutesTable
+
+  QualityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-quality-handler"
+      CodeUri: ../src/lambdas/quality_handler
+      Environment:
+        Variables:
+          INSPECTION_TABLE: !Ref InspectionTable
+          COMPLIANCE_TABLE: !Ref ComplianceTable
+          STANDARDS_TABLE: !Ref StandardsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref InspectionTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ComplianceTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref StandardsTable
+
+  # ---------------------------------------------------------------------------
+  # Gateway execution role. The gateway assumes this to read tool schemas from
+  # S3 and to invoke the domain Lambdas. "Credential provider = GATEWAY_IAM_ROLE"
+  # on each target means the target uses exactly this role.
+  # ---------------------------------------------------------------------------
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-gateway-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: invoke-domain-tools
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt InventoryFunction.Arn
+                  - !GetAtt SupplierFunction.Arn
+                  - !GetAtt LogisticsFunction.Arn
+                  - !GetAtt QualityFunction.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ArtifactsBucket}/${SchemaPrefix}/*"
+
+  # ---------------------------------------------------------------------------
+  # The gateway. Inbound auth is the same Cognito pool used everywhere else:
+  # the orchestrator presents an M2M access token, the gateway validates it
+  # against the discovery URL and checks the client is on the allow list.
+  # ---------------------------------------------------------------------------
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ProjectName}gateway"
+      Description: Supply chain domain tools exposed over MCP
+      ProtocolType: MCP
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref DiscoveryUrl
+          AllowedClients:
+            - !Ref MachineClientId
+
+  # ---------------------------------------------------------------------------
+  # Targets. Each binds one Lambda to one tool schema. The schema is what the
+  # agent actually discovers — a target without one is a target with no tools.
+  # ---------------------------------------------------------------------------
+  InventoryTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      Name: inventory-target
+      GatewayIdentifier: !Ref Gateway
+      Description: Inventory lookups backed by DynamoDB
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt InventoryFunction.Arn
+            ToolSchema:
+              S3:
+                Uri: !Sub "s3://${ArtifactsBucket}/${SchemaPrefix}/inventory_tools.json"
+                BucketOwnerAccountId: !Ref AWS::AccountId
+
+  SupplierTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      Name: supplier-target
+      GatewayIdentifier: !Ref Gateway
+      Description: Supplier records and sourcing
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt SupplierFunction.Arn
+            ToolSchema:
+              S3:
+                Uri: !Sub "s3://${ArtifactsBucket}/${SchemaPrefix}/supplier_tools.json"
+                BucketOwnerAccountId: !Ref AWS::AccountId
+
+  # The lab's bug lived here: this target's LambdaArn pointed at the inventory
+  # function, so "show me shipments" returned inventory rows.
+  LogisticsTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      Name: logistics-target
+      GatewayIdentifier: !Ref Gateway
+      Description: Shipment tracking and routing
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt LogisticsFunction.Arn
+            ToolSchema:
+              S3:
+                Uri: !Sub "s3://${ArtifactsBucket}/${SchemaPrefix}/logistics_tools.json"
+                BucketOwnerAccountId: !Ref AWS::AccountId
+
+  QualityTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      Name: quality-target
+      GatewayIdentifier: !Ref Gateway
+      Description: Inspections, compliance and standards
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt QualityFunction.Arn
+            ToolSchema:
+              S3:
+                Uri: !Sub "s3://${ArtifactsBucket}/${SchemaPrefix}/quality_tools.json"
+                BucketOwnerAccountId: !Ref AWS::AccountId
+
+Outputs:
+  GatewayUrl:
+    Description: MCP endpoint. Becomes GATEWAY_URL on the orchestrator runtime.
+    Value: !GetAtt Gateway.GatewayUrl
+  GatewayId:
+    Value: !Ref Gateway
+  GatewayRoleArn:
+    Value: !GetAtt GatewayRole.Arn

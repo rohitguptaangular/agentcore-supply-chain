@@ -1,0 +1,44 @@
+[
+  {
+    "name": "list_suppliers",
+    "description": "List all registered suppliers with their contact details, country, lead time in days and performance rating.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "country": {
+          "type": "string",
+          "description": "Optional country filter, for example 'Germany'."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "get_supplier",
+    "description": "Retrieve a single supplier record by its supplier identifier.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "supplier_id": {
+          "type": "string",
+          "description": "The supplier identifier, for example 'SUP-001'."
+        }
+      },
+      "required": ["supplier_id"]
+    }
+  },
+  {
+    "name": "find_suppliers_for_product",
+    "description": "Find the suppliers capable of supplying a given product, ordered by performance rating. Use this when the user asks who can supply something or wants an alternative source.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "product_id": {
+          "type": "string",
+          "description": "The product identifier to source, for example 'PROD-002'."
+        }
+      },
+      "required": ["product_id"]
+    }
+  }
+]
