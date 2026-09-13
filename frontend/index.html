@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supply Chain Assistant</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <header class="sidebar-header">
+          <h2>Sessions</h2>
+          <button id="new-session" class="button-small">+ New</button>
+        </header>
+
+        <!-- Each session is one conversation. The agent files memories under
+             the actor id, which persists across sessions — that is what makes
+             recall in a brand new session possible. -->
+        <ul id="session-list" class="session-list"></ul>
+
+        <div class="capabilities">
+          <h3>Deployed capabilities</h3>
+          <!-- Populated from config.js, which the deploy script generates from
+               CloudFormation stack outputs. These reflect what was actually
+               provisioned, not what the UI hopes exists. -->
+          <ul id="capability-list" class="capability-list"></ul>
+        </div>
+
+        <footer class="sidebar-footer">
+          <span id="actor-label" class="muted"></span>
+        </footer>
+      </aside>
+
+      <main class="main">
+        <header class="main-header">
+          <h1>Supply Chain Assistant</h1>
+          <p class="muted" id="session-label"></p>
+        </header>
+
+        <div id="messages" class="messages">
+          <div class="message assistant">
+            <div class="bubble">
+              Ask about inventory, suppliers, shipments, quality, or supply
+              chain procedures.
+            </div>
+          </div>
+        </div>
+
+        <form id="composer" class="composer">
+          <input
+            id="input"
+            type="text"
+            autocomplete="off"
+            placeholder="Ask about inventory, suppliers, logistics, or quality…"
+          />
+          <button id="send" type="submit">Send</button>
+        </form>
+
+        <div class="examples">
+          <span class="muted">Try:</span>
+          <button class="chip" data-prompt="What is our current inventory?">
+            current inventory
+          </button>
+          <button class="chip" data-prompt="Which products need reordering?">
+            needs reordering
+          </button>
+          <button class="chip" data-prompt="Show me shipments that are delayed">
+            delayed shipments
+          </button>
+          <button
+            class="chip"
+            data-prompt="What is our inventory receiving procedure?"
+          >
+            receiving procedure
+          </button>
+        </div>
+      </main>
+    </div>
+
+    <!-- Generated at deploy time by `make frontend`; not committed. -->
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

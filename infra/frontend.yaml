@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Frontend layer — a private S3 bucket serving the chat UI through CloudFront.
+
+  The bucket blocks all public access. CloudFront reaches it using an Origin
+  Access Control, which signs each request with SigV4, and a bucket policy that
+  trusts only this distribution. The result is HTTPS on a managed domain with
+  no publicly reachable object in the bucket.
+
+Parameters:
+  ProjectName:
+    Type: String
+
+Resources:
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-site-${AWS::AccountId}-${AWS::Region}"
+      # No WebsiteConfiguration on purpose: the S3 website endpoint is HTTP
+      # only and requires a public bucket. CloudFront + OAC replaces it.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Origin Access Control is the current mechanism; Origin Access Identity is
+  # its deprecated predecessor. OAC signs requests with SigV4 and supports
+  # SSE-KMS buckets, which OAI never did.
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ProjectName}-site-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ProjectName} supply chain assistant UI"
+        DefaultRootObject: index.html
+        # PriceClass_100 restricts edge locations to North America and Europe.
+        # Cheapest tier, and adequate for a demo.
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: SiteOrigin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            # Required by CloudFront for an S3 origin using OAC, and left
+            # empty precisely because OAC replaces the OAI it would name.
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: SiteOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # AWS managed policy "CachingOptimized".
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          # The UI is a single page; anything not found should still render it
+          # rather than showing CloudFront's XML error document.
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+        ViewerCertificate:
+          # The default *.cloudfront.net certificate. A custom domain would
+          # need an ACM certificate in us-east-1 plus a Route 53 alias.
+          CloudFrontDefaultCertificate: true
+
+  # Grants exactly one principal read access: this distribution. The SourceArn
+  # condition is what prevents another account's distribution from pointing at
+  # this bucket — the confused deputy problem again.
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+Outputs:
+  BucketName:
+    Description: Publish the contents of frontend/ here with `make frontend`.
+    Value: !Ref SiteBucket
+  DistributionUrl:
+    Description: Open this in a browser.
+    Value: !Sub "https://${Distribution.DomainName}"
+  DistributionId:
+    Description: Needed to invalidate the cache after publishing a new build.
+    Value: !Ref Distribution
