@@ -24,7 +24,9 @@ exists — VPC is off there because that deployment was run without it.
 
 ## Architecture
 
-Diagram and full walkthrough in [docs/architecture.md](docs/architecture.md).
+![Architecture](docs/images/architecture.svg)
+
+Full walkthrough in [docs/architecture.md](docs/architecture.md).
 
 Two agents, not one:
 
