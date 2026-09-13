@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Knowledge layer — the RAG pipeline.
+
+  Five things have to exist in a strict order:
+    1. an encryption policy (a collection cannot be created without one)
+    2. the OpenSearch Serverless collection itself
+    3. a data access policy naming who may read and write its indexes
+    4. the vector index, created by a custom resource
+    5. the Bedrock knowledge base and its S3 data source
+
+  Steps 1-3 are ordinary CloudFormation. Step 4 is not: CloudFormation has no
+  resource type for an OpenSearch index, so a Lambda-backed custom resource
+  creates it over the collection's HTTP API.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EmbeddingModelId:
+    Type: String
+  KnowledgeBucketArn:
+    Type: String
+  KnowledgeBucketName:
+    Type: String
+
+  VectorIndexName:
+    Type: String
+    Default: bedrock-knowledge-base-index
+  VectorField:
+    Type: String
+    Default: bedrock-kb-vector
+    Description: >
+      Arbitrary, but the index mapping and the knowledge base FieldMapping must
+      agree exactly. A mismatch here produces a knowledge base that creates
+      cleanly and then fails every sync.
+  TextField:
+    Type: String
+    Default: AMAZON_BEDROCK_TEXT_CHUNK
+  MetadataField:
+    Type: String
+    Default: AMAZON_BEDROCK_METADATA
+  EmbeddingDimension:
+    Type: Number
+    Default: 1024
+    Description: Must match the embedding model. Titan Text Embeddings V2 is 1024.
+
+Resources:
+  # ===========================================================================
+  # 1. IAM — two identities, each with the narrowest job possible.
+  # ===========================================================================
+
+  # The knowledge base assumes this to read documents, call the embedding model
+  # and write vectors. The confused-deputy conditions restrict it to being
+  # assumed on behalf of knowledge bases in this account only.
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-kb-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+      Policies:
+        - PolicyName: knowledge-base-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadSourceDocuments
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Ref KnowledgeBucketArn
+                  - !Sub "${KnowledgeBucketArn}/*"
+              - Sid: InvokeEmbeddingModel
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+              - Sid: WriteVectors
+                Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt Collection.Arn
+
+  # The custom resource's own identity. It only ever creates one index.
+  IndexCreatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-kb-index-creator"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: create-vector-index
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt Collection.Arn
+
+  # ===========================================================================
+  # 2. OpenSearch Serverless. Three policies, then the collection.
+  # ===========================================================================
+
+  # Encryption policy must exist BEFORE the collection — creating a collection
+  # with no matching encryption policy simply fails.
+  EncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub "${ProjectName}-kb-enc"
+      Type: encryption
+      Policy: !Sub |
+        {
+          "Rules": [
+            {"ResourceType": "collection", "Resource": ["collection/${ProjectName}-kb"]}
+          ],
+          "AWSOwnedKey": true
+        }
+
+  # Network policy governs where the collection's ENDPOINT can be reached from.
+  # AllowFromPublic still requires IAM auth on every request — this is not an
+  # open collection. Locking it to a VPC endpoint would be the production
+  # choice and is noted in docs/architecture.md.
+  NetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub "${ProjectName}-kb-net"
+      Type: network
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {"ResourceType": "collection", "Resource": ["collection/${ProjectName}-kb"]},
+              {"ResourceType": "dashboard", "Resource": ["collection/${ProjectName}-kb"]}
+            ],
+            "AllowFromPublic": true
+          }
+        ]
+
+  Collection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - EncryptionPolicy
+      - NetworkPolicy
+    Properties:
+      Name: !Sub "${ProjectName}-kb"
+      Type: VECTORSEARCH
+      Description: Vector store for supply chain knowledge base documents
+
+  # Data access policy is the second, separate authorisation layer: IAM says
+  # "you may call this collection", this says "and here is what you may do to
+  # its indexes". Both must allow the call. Omitting a principal here is the
+  # classic cause of a knowledge base that syncs zero documents.
+  DataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub "${ProjectName}-kb-access"
+      Type: data
+      Policy: !Sub
+        - |
+          [
+            {
+              "Rules": [
+                {
+                  "ResourceType": "index",
+                  "Resource": ["index/${ProjectName}-kb/*"],
+                  "Permission": [
+                    "aoss:CreateIndex", "aoss:DeleteIndex", "aoss:UpdateIndex",
+                    "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"
+                  ]
+                },
+                {
+                  "ResourceType": "collection",
+                  "Resource": ["collection/${ProjectName}-kb"],
+                  "Permission": ["aoss:CreateCollectionItems", "aoss:DescribeCollectionItems"]
+                }
+              ],
+              "Principal": ["${KbRoleArn}", "${IndexRoleArn}"]
+            }
+          ]
+        - KbRoleArn: !GetAtt KnowledgeBaseRole.Arn
+          IndexRoleArn: !GetAtt IndexCreatorRole.Arn
+
+  # ===========================================================================
+  # 3. The custom resource that creates the vector index.
+  # ===========================================================================
+
+  IndexCreatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-kb-index-creator"
+      CodeUri: ../src/lambdas/opensearch_index
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures: [arm64]
+      # Generous: the function retries while the data access policy propagates.
+      Timeout: 300
+      MemorySize: 256
+      Role: !GetAtt IndexCreatorRole.Arn
+
+  VectorIndex:
+    Type: AWS::CloudFormation::CustomResource
+    # Without this the function would run before it is allowed to touch the
+    # collection. The retry loop covers propagation delay, not missing policy.
+    DependsOn: DataAccessPolicy
+    Properties:
+      ServiceToken: !GetAtt IndexCreatorFunction.Arn
+      CollectionEndpoint: !GetAtt Collection.CollectionEndpoint
+      IndexName: !Ref VectorIndexName
+      VectorField: !Ref VectorField
+      TextField: !Ref TextField
+      MetadataField: !Ref MetadataField
+      Dimension: !Ref EmbeddingDimension
+
+  # ===========================================================================
+  # 4. The knowledge base and its data source.
+  # ===========================================================================
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    # The index must be queryable before Bedrock will validate the KB.
+    DependsOn: VectorIndex
+    Properties:
+      Name: !Sub "${ProjectName}-kb"
+      Description: Supply chain procedures, manuals and policies
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt Collection.Arn
+          VectorIndexName: !Ref VectorIndexName
+          # These three must match the index mapping exactly.
+          FieldMapping:
+            VectorField: !Ref VectorField
+            TextField: !Ref TextField
+            MetadataField: !Ref MetadataField
+
+  # Creating the data source does NOT index anything. Documents are only
+  # embedded when an ingestion job runs — `make seed` starts one.
+  DataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: !Sub "${ProjectName}-documents"
+      Description: !Sub "Markdown documents in s3://${KnowledgeBucketName}"
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !Ref KnowledgeBucketArn
+
+Outputs:
+  KnowledgeBaseId:
+    Description: Becomes KNOWLEDGE_BASE_ID on the KB specialist agent runtime.
+    Value: !Ref KnowledgeBase
+  DataSourceId:
+    Description: Pass to `aws bedrock-agent start-ingestion-job` to index documents.
+    Value: !GetAtt DataSource.DataSourceId
+  CollectionArn:
+    Value: !GetAtt Collection.Arn
+  CollectionEndpoint:
+    Value: !GetAtt Collection.CollectionEndpoint
+  KnowledgeBaseRoleArn:
+    Value: !GetAtt KnowledgeBaseRole.Arn
