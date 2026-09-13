@@ -19,7 +19,7 @@ make bootstrap package deploy seed frontend
 
 ## Architecture
 
-![Architecture](docs/architecture.png)
+Diagram and full walkthrough in [docs/architecture.md](docs/architecture.md).
 
 Two agents, not one:
 
