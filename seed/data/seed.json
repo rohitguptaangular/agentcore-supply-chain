@@ -1,0 +1,342 @@
+{
+  "_comment": [
+    "Dummy data for the supply chain assistant. Entirely invented — no real",
+    "company, supplier or person appears here.",
+    "",
+    "The records are deliberately cross-referenced: suppliers list the products",
+    "they supply, shipments name a route, inspections name a product, and",
+    "compliance records name suppliers and facilities. That lets the agent",
+    "answer questions that span domains, which is the interesting behaviour to",
+    "demonstrate. Two products sit at or below their reorder point so",
+    "check_reorder always returns something."
+  ],
+
+  "inventory": [
+    {
+      "product_id": "PROD-001",
+      "name": "Industrial Bearings 6204",
+      "category": "Mechanical Parts",
+      "quantity": 500,
+      "reorder_point": 100,
+      "warehouse_location": "WH-A-12",
+      "unit_price": 12.5,
+      "unit": "each"
+    },
+    {
+      "product_id": "PROD-002",
+      "name": "Steel Bolts M10",
+      "category": "Fasteners",
+      "quantity": 2000,
+      "reorder_point": 500,
+      "warehouse_location": "WH-B-03",
+      "unit_price": 0.75,
+      "unit": "each"
+    },
+    {
+      "product_id": "PROD-003",
+      "name": "Hydraulic Seal Kit",
+      "category": "Hydraulics",
+      "quantity": 28,
+      "reorder_point": 30,
+      "warehouse_location": "WH-C-07",
+      "unit_price": 34.99,
+      "unit": "kit"
+    },
+    {
+      "product_id": "PROD-004",
+      "name": "Copper Wiring 12AWG",
+      "category": "Electrical",
+      "quantity": 800,
+      "reorder_point": 200,
+      "warehouse_location": "WH-A-05",
+      "unit_price": 2.25,
+      "unit": "metre"
+    },
+    {
+      "product_id": "PROD-005",
+      "name": "Control Relay 24V",
+      "category": "Electrical",
+      "quantity": 95,
+      "reorder_point": 150,
+      "warehouse_location": "WH-A-09",
+      "unit_price": 18.4,
+      "unit": "each"
+    }
+  ],
+
+  "suppliers": [
+    {
+      "supplier_id": "SUP-001",
+      "name": "Nordwerk Components GmbH",
+      "country": "Germany",
+      "contact_email": "orders@example-nordwerk.test",
+      "lead_time_days": 14,
+      "performance_rating": 4.7,
+      "products": ["PROD-001", "PROD-003"]
+    },
+    {
+      "supplier_id": "SUP-002",
+      "name": "Meridian Fasteners Ltd",
+      "country": "United Kingdom",
+      "contact_email": "sales@example-meridianfast.test",
+      "lead_time_days": 7,
+      "performance_rating": 4.2,
+      "products": ["PROD-002"]
+    },
+    {
+      "supplier_id": "SUP-003",
+      "name": "Pacific Electricals Co",
+      "country": "Singapore",
+      "contact_email": "supply@example-pacificelec.test",
+      "lead_time_days": 21,
+      "performance_rating": 3.9,
+      "products": ["PROD-004", "PROD-005"]
+    },
+    {
+      "supplier_id": "SUP-004",
+      "name": "Atlas Industrial Supply",
+      "country": "United States",
+      "contact_email": "procurement@example-atlasind.test",
+      "lead_time_days": 10,
+      "performance_rating": 4.5,
+      "products": ["PROD-001", "PROD-002", "PROD-005"]
+    }
+  ],
+
+  "routes": [
+    {
+      "route_id": "RTE-001",
+      "origin": "Hamburg, DE",
+      "destination": "Rotterdam, NL",
+      "transport_mode": "ROAD",
+      "transit_days": 2,
+      "distance_km": 450
+    },
+    {
+      "route_id": "RTE-002",
+      "origin": "Singapore, SG",
+      "destination": "Rotterdam, NL",
+      "transport_mode": "SEA",
+      "transit_days": 28,
+      "distance_km": 15400
+    },
+    {
+      "route_id": "RTE-003",
+      "origin": "Felixstowe, UK",
+      "destination": "Rotterdam, NL",
+      "transport_mode": "SEA",
+      "transit_days": 3,
+      "distance_km": 320
+    },
+    {
+      "route_id": "RTE-004",
+      "origin": "Chicago, US",
+      "destination": "Rotterdam, NL",
+      "transport_mode": "AIR",
+      "transit_days": 4,
+      "distance_km": 6600
+    }
+  ],
+
+  "shipments": [
+    {
+      "shipment_id": "SHP-001",
+      "product_id": "PROD-001",
+      "supplier_id": "SUP-001",
+      "route_id": "RTE-001",
+      "quantity": 250,
+      "status": "IN_TRANSIT",
+      "carrier": "Rhine Freight",
+      "dispatched_date": "2026-09-05",
+      "estimated_arrival": "2026-09-15"
+    },
+    {
+      "shipment_id": "SHP-002",
+      "product_id": "PROD-004",
+      "supplier_id": "SUP-003",
+      "route_id": "RTE-002",
+      "quantity": 1200,
+      "status": "DELAYED",
+      "carrier": "Oceanic Lines",
+      "dispatched_date": "2026-08-12",
+      "estimated_arrival": "2026-09-22",
+      "delay_reason": "Port congestion at transhipment hub"
+    },
+    {
+      "shipment_id": "SHP-003",
+      "product_id": "PROD-002",
+      "supplier_id": "SUP-002",
+      "route_id": "RTE-003",
+      "quantity": 5000,
+      "status": "DELIVERED",
+      "carrier": "Channel Cargo",
+      "dispatched_date": "2026-08-28",
+      "estimated_arrival": "2026-09-01",
+      "delivered_date": "2026-09-01"
+    },
+    {
+      "shipment_id": "SHP-004",
+      "product_id": "PROD-005",
+      "supplier_id": "SUP-004",
+      "route_id": "RTE-004",
+      "quantity": 400,
+      "status": "IN_TRANSIT",
+      "carrier": "TransAtlantic Air",
+      "dispatched_date": "2026-09-10",
+      "estimated_arrival": "2026-09-14"
+    },
+    {
+      "shipment_id": "SHP-005",
+      "product_id": "PROD-003",
+      "supplier_id": "SUP-001",
+      "route_id": "RTE-001",
+      "quantity": 120,
+      "status": "DELAYED",
+      "carrier": "Rhine Freight",
+      "dispatched_date": "2026-09-02",
+      "estimated_arrival": "2026-09-18",
+      "delay_reason": "Customs documentation query"
+    }
+  ],
+
+  "inspection": [
+    {
+      "inspection_id": "INS-1001",
+      "product_id": "PROD-001",
+      "batch_id": "BATCH-2201",
+      "inspection_date": "2026-09-08",
+      "result": "PASS",
+      "defect_count": 0,
+      "sample_size": 50,
+      "inspector": "QA Team A"
+    },
+    {
+      "inspection_id": "INS-1002",
+      "product_id": "PROD-003",
+      "batch_id": "BATCH-2202",
+      "inspection_date": "2026-09-09",
+      "result": "FAIL",
+      "defect_count": 7,
+      "sample_size": 40,
+      "inspector": "QA Team B",
+      "notes": "Seal compression below tolerance on 7 units"
+    },
+    {
+      "inspection_id": "INS-1003",
+      "product_id": "PROD-002",
+      "batch_id": "BATCH-2203",
+      "inspection_date": "2026-09-03",
+      "result": "PASS",
+      "defect_count": 1,
+      "sample_size": 100,
+      "inspector": "QA Team A"
+    },
+    {
+      "inspection_id": "INS-1004",
+      "product_id": "PROD-004",
+      "batch_id": "BATCH-2204",
+      "inspection_date": "2026-09-11",
+      "result": "PASS",
+      "defect_count": 0,
+      "sample_size": 60,
+      "inspector": "QA Team C"
+    },
+    {
+      "inspection_id": "INS-1005",
+      "product_id": "PROD-001",
+      "batch_id": "BATCH-2205",
+      "inspection_date": "2026-09-12",
+      "result": "CONDITIONAL_PASS",
+      "defect_count": 3,
+      "sample_size": 50,
+      "inspector": "QA Team B",
+      "notes": "Within tolerance but trending toward the limit"
+    },
+    {
+      "inspection_id": "INS-1006",
+      "product_id": "PROD-005",
+      "batch_id": "BATCH-2206",
+      "inspection_date": "2026-09-07",
+      "result": "PASS",
+      "defect_count": 0,
+      "sample_size": 30,
+      "inspector": "QA Team C"
+    }
+  ],
+
+  "compliance": [
+    {
+      "entity_id": "SUP-001",
+      "entity_type": "SUPPLIER",
+      "status": "COMPLIANT",
+      "certifications": ["ISO 9001", "ISO 14001"],
+      "last_audit_date": "2026-03-14",
+      "next_audit_date": "2027-03-14"
+    },
+    {
+      "entity_id": "SUP-003",
+      "entity_type": "SUPPLIER",
+      "status": "ACTION_REQUIRED",
+      "certifications": ["ISO 9001"],
+      "last_audit_date": "2026-01-20",
+      "next_audit_date": "2026-10-01",
+      "findings": "Environmental management certification lapsed"
+    },
+    {
+      "entity_id": "SUP-004",
+      "entity_type": "SUPPLIER",
+      "status": "COMPLIANT",
+      "certifications": ["ISO 9001", "AS9100"],
+      "last_audit_date": "2026-06-02",
+      "next_audit_date": "2027-06-02"
+    },
+    {
+      "entity_id": "PROD-003",
+      "entity_type": "PRODUCT",
+      "status": "UNDER_REVIEW",
+      "certifications": ["CE"],
+      "last_audit_date": "2026-09-09",
+      "next_audit_date": "2026-10-09",
+      "findings": "Open corrective action following inspection INS-1002"
+    },
+    {
+      "entity_id": "WH-A",
+      "entity_type": "FACILITY",
+      "status": "COMPLIANT",
+      "certifications": ["ISO 45001"],
+      "last_audit_date": "2026-05-11",
+      "next_audit_date": "2027-05-11"
+    }
+  ],
+
+  "standards": [
+    {
+      "product_category": "Mechanical Parts",
+      "specification": "ISO 492 precision class 6",
+      "tolerance": "Radial runout max 0.015 mm",
+      "sampling_plan": "AQL 1.0, sample 50 per batch",
+      "max_defect_rate_percent": 1.0
+    },
+    {
+      "product_category": "Fasteners",
+      "specification": "ISO 898-1 property class 8.8",
+      "tolerance": "Tensile strength min 800 MPa",
+      "sampling_plan": "AQL 1.5, sample 100 per batch",
+      "max_defect_rate_percent": 1.5
+    },
+    {
+      "product_category": "Hydraulics",
+      "specification": "ISO 3601 seal dimensional standard",
+      "tolerance": "Compression set max 15 percent",
+      "sampling_plan": "AQL 0.65, sample 40 per batch",
+      "max_defect_rate_percent": 0.65
+    },
+    {
+      "product_category": "Electrical",
+      "specification": "IEC 60228 class 2 stranded conductor",
+      "tolerance": "Conductor resistance max 1.54 ohm per km",
+      "sampling_plan": "AQL 1.0, sample 60 per batch",
+      "max_defect_rate_percent": 1.0
+    }
+  ]
+}
