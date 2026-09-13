@@ -17,6 +17,11 @@ It deploys with one CloudFormation stack.
 make bootstrap package deploy seed frontend
 ```
 
+![The assistant answering a reorder question](docs/images/chat-ui.png)
+
+The sidebar reports what was actually deployed rather than what the UI assumes
+exists — VPC is off there because that deployment was run without it.
+
 ## Architecture
 
 Diagram and full walkthrough in [docs/architecture.md](docs/architecture.md).
